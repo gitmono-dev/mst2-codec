@@ -15,7 +15,7 @@ use serde_json::Value;
 
 const SPEC_ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../Mega_ScorpioFS_MST2_Specs_0.2.0_2026-09-15/mega_scorpio_mst2_specs"
+    "/../Mega_ScorpioFS_MST2_Specs_0.2.1_2026-09-15/mega_scorpio_mst2_specs"
 );
 
 fn vectors_dir() -> std::path::PathBuf {
