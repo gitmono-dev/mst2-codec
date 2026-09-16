@@ -512,7 +512,9 @@ impl Page {
                 }
             }
             if group.is_empty() {
-                return Err(CodecError::BadOrdering("route label selects an empty group"));
+                return Err(CodecError::BadOrdering(
+                    "route label selects an empty group",
+                ));
             }
             let child_bytes = Page::build(&group)?;
             if page_id(&child_bytes) != child.child_page_id {
@@ -527,7 +529,8 @@ impl Page {
     }
 
     /// Longest common prefix of all entry names (spec 05 §5).
-    fn lcp(names: &[Vec<u8>]) -> Vec<u8> {        let first = &names[0];
+    fn lcp(names: &[Vec<u8>]) -> Vec<u8> {
+        let first = &names[0];
         let mut len = first.len();
         for n in &names[1..] {
             len = len.min(n.len());
@@ -842,7 +845,10 @@ mod tests {
         let pages = Page::pages_along_route(&entries, &[]).unwrap();
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0], root);
-        assert!(matches!(Page::decode(&root).unwrap().0, Page::Branch { .. }));
+        assert!(matches!(
+            Page::decode(&root).unwrap().0,
+            Page::Branch { .. }
+        ));
     }
 
     #[test]
@@ -879,7 +885,10 @@ mod tests {
                 continue;
             };
             let (sub, _) = Page::decode(&pages[1]).unwrap();
-            let Page::Branch { children: grand, .. } = sub else {
+            let Page::Branch {
+                children: grand, ..
+            } = sub
+            else {
                 continue;
             };
             saw_two_level += 1;
@@ -914,15 +923,20 @@ mod tests {
             Entry::file(EntryKind::Regular, b"a", 1, cid(1)),
             Entry::file(EntryKind::Regular, b"b", 1, cid(2)),
         ];
-        assert!(matches!(Page::decode(&Page::build(&entries).unwrap()).unwrap().0, Page::Leaf { .. }));
-        assert!(Page::pages_along_route(&entries, &[b'a']).is_err());
+        assert!(matches!(
+            Page::decode(&Page::build(&entries).unwrap()).unwrap().0,
+            Page::Leaf { .. }
+        ));
+        assert!(Page::pages_along_route(&entries, b"a").is_err());
     }
 
     #[test]
     fn empty_directory_yields_its_empty_leaf() {
         let pages = Page::pages_along_route(&[], &[]).unwrap();
         assert_eq!(pages.len(), 1);
-        assert!(matches!(Page::decode(&pages[0]).unwrap().0, Page::Leaf { entries } if entries.is_empty()));
-        assert!(Page::pages_along_route(&[], &[b'x']).is_err());
+        assert!(
+            matches!(Page::decode(&pages[0]).unwrap().0, Page::Leaf { entries } if entries.is_empty())
+        );
+        assert!(Page::pages_along_route(&[], b"x").is_err());
     }
 }
