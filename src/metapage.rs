@@ -456,9 +456,78 @@ impl Page {
         }
     }
 
+    /// Pages of the canonical tree over `entries` that lie on `route`,
+    /// root first.
+    ///
+    /// `route` is a sequence of branch-child labels (spec 04 §8): each step
+    /// picks the child whose label matches in the page reached so far. The
+    /// returned pages are exactly the bytes `build` produced for those
+    /// subtrees, so their `page_id`s are the canonical ones — callers that
+    /// hold a parent page can check the descent against
+    /// `BranchChild::child_page_id`.
+    ///
+    /// An empty route returns just the root page. Descending past a leaf, or
+    /// into a label the page does not have, is a `BadOrdering` error rather
+    /// than a silent empty result.
+    pub fn pages_along_route(entries: &[Entry], route: &[u8]) -> CodecResult<Vec<Vec<u8>>> {
+        if entries.is_empty() {
+            // An empty directory is a valid empty leaf; only a route that
+            // tries to descend into it is an error.
+            if route.is_empty() {
+                return Ok(vec![Page::build(entries)?]);
+            }
+            return Err(CodecError::BadOrdering("route descends past a leaf page"));
+        }
+        let mut current: Vec<Entry> = entries.to_vec();
+        let mut page = Page::build(&current)?;
+        let mut out = vec![page.clone()];
+        let mut cursor = route;
+        while let Some((&label, rest)) = cursor.split_first() {
+            let (decoded, _) = Page::decode(&page)?;
+            let (prefix, children) = match decoded {
+                Page::Leaf { .. } => {
+                    return Err(CodecError::BadOrdering("route descends past a leaf page"))
+                }
+                Page::Branch {
+                    prefix, children, ..
+                } => (prefix, children),
+            };
+            let child = children
+                .iter()
+                .find(|c| c.label == label)
+                .ok_or(CodecError::BadOrdering("route label not present in page"))?;
+
+            // Repartition exactly as `build` does: entries sharing the branch
+            // prefix group by their next byte, the terminal entry stays put.
+            let mut group: Vec<Entry> = Vec::new();
+            for e in &current {
+                if Some(e.name.as_slice()) == Some(prefix.as_slice()) {
+                    continue;
+                }
+                if e.name.len() <= prefix.len() || e.name[..prefix.len()] != prefix[..] {
+                    return Err(CodecError::BadOrdering("entry outside branch prefix"));
+                }
+                if e.name[prefix.len()] == label {
+                    group.push(e.clone());
+                }
+            }
+            if group.is_empty() {
+                return Err(CodecError::BadOrdering("route label selects an empty group"));
+            }
+            let child_bytes = Page::build(&group)?;
+            if page_id(&child_bytes) != child.child_page_id {
+                return Err(CodecError::DigestMismatch("branch child page id"));
+            }
+            out.push(child_bytes.clone());
+            page = child_bytes;
+            current = group;
+            cursor = rest;
+        }
+        Ok(out)
+    }
+
     /// Longest common prefix of all entry names (spec 05 §5).
-    fn lcp(names: &[Vec<u8>]) -> Vec<u8> {
-        let first = &names[0];
+    fn lcp(names: &[Vec<u8>]) -> Vec<u8> {        let first = &names[0];
         let mut len = first.len();
         for n in &names[1..] {
             len = len.min(n.len());
@@ -751,5 +820,109 @@ mod tests {
         let mut bytes = Page::Leaf { entries: vec![] }.encode().unwrap();
         bytes[4] = 7;
         assert!(Page::decode(&bytes).is_err());
+    }
+
+    fn many_files(n: usize) -> Vec<Entry> {
+        // Names are single components (no `/`), share a prefix, and fan out
+        // widely below it, so enough entries force a multi-level branch tree.
+        let mut v: Vec<Entry> = (0..n)
+            .map(|i| {
+                let name = format!("a{i:06}");
+                Entry::file(EntryKind::Regular, name.as_bytes(), i as u64, cid(i as u8))
+            })
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    }
+
+    #[test]
+    fn empty_route_returns_the_root_page() {
+        let entries = many_files(600);
+        let root = Page::build(&entries).unwrap();
+        let pages = Page::pages_along_route(&entries, &[]).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0], root);
+        assert!(matches!(Page::decode(&root).unwrap().0, Page::Branch { .. }));
+    }
+
+    #[test]
+    fn route_walk_matches_the_parent_page_children() {
+        let entries = many_files(600);
+        let root = Page::build(&entries).unwrap();
+        let (page, _) = Page::decode(&root).unwrap();
+        let Page::Branch { children, .. } = page else {
+            panic!("expected a branch root");
+        };
+        for child in &children {
+            let pages = Page::pages_along_route(&entries, &[child.label]).unwrap();
+            assert_eq!(pages.len(), 2, "root + one child");
+            assert_eq!(pages[0], root);
+            // The walked page is byte-identical to the one the parent commits
+            // to, which is what makes the route auditable.
+            assert_eq!(page_id(&pages[1]), child.child_page_id);
+        }
+    }
+
+    #[test]
+    fn two_level_route_resolves_to_a_leaf() {
+        // Deep trees need more than one branch level; build one and walk every
+        // root->child->leaf path, checking the leaf holds only its own group.
+        let entries = many_files(4000);
+        let root = Page::build(&entries).unwrap();
+        let (page, _) = Page::decode(&root).unwrap();
+        let Page::Branch { children, .. } = page else {
+            panic!("expected a branch root");
+        };
+        let mut saw_two_level = 0;
+        for child in &children {
+            let Ok(pages) = Page::pages_along_route(&entries, &[child.label]) else {
+                continue;
+            };
+            let (sub, _) = Page::decode(&pages[1]).unwrap();
+            let Page::Branch { children: grand, .. } = sub else {
+                continue;
+            };
+            saw_two_level += 1;
+            let label = grand[0].label;
+            let deep = Page::pages_along_route(&entries, &[child.label, label]).unwrap();
+            assert_eq!(deep.len(), 3);
+            assert_eq!(deep[0], root);
+            assert_eq!(deep[1], pages[1]);
+            assert_eq!(page_id(&deep[2]), grand[0].child_page_id);
+        }
+        assert!(saw_two_level > 0, "fixture must produce a multi-level tree");
+    }
+
+    #[test]
+    fn unknown_route_label_is_an_error_not_an_empty_result() {
+        let entries = many_files(600);
+        let root = Page::build(&entries).unwrap();
+        let (page, _) = Page::decode(&root).unwrap();
+        let Page::Branch { children, .. } = page else {
+            panic!("expected a branch root");
+        };
+        let missing = (b'a'..=b'z')
+            .chain(b'A'..=b'Z')
+            .find(|l| !children.iter().any(|c| c.label == *l))
+            .expect("a label outside the page");
+        assert!(Page::pages_along_route(&entries, &[missing]).is_err());
+    }
+
+    #[test]
+    fn descending_past_a_leaf_is_rejected() {
+        let entries = vec![
+            Entry::file(EntryKind::Regular, b"a", 1, cid(1)),
+            Entry::file(EntryKind::Regular, b"b", 1, cid(2)),
+        ];
+        assert!(matches!(Page::decode(&Page::build(&entries).unwrap()).unwrap().0, Page::Leaf { .. }));
+        assert!(Page::pages_along_route(&entries, &[b'a']).is_err());
+    }
+
+    #[test]
+    fn empty_directory_yields_its_empty_leaf() {
+        let pages = Page::pages_along_route(&[], &[]).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert!(matches!(Page::decode(&pages[0]).unwrap().0, Page::Leaf { entries } if entries.is_empty()));
+        assert!(Page::pages_along_route(&[], &[b'x']).is_err());
     }
 }
