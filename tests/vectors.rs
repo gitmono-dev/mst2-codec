@@ -22,6 +22,34 @@ fn vectors_dir() -> std::path::PathBuf {
     std::path::Path::new(SPEC_ROOT).join("vectors")
 }
 
+/// The spec vectors ship in the versioned `Mega_ScorpioFS_MST2_Specs_*`
+/// bundle, which sits beside the crate and is not vendored here. When the
+/// bundle is absent every test below would fail on a missing file rather
+/// than on a real defect, so they return early instead — loudly, on stderr,
+/// so a run without the bundle is never mistaken for a run that verified
+/// the codec against the spec.
+///
+/// The probe is deliberately limited to `manifest.json`: once the bundle is
+/// present, a missing or truncated individual vector still panics, so a
+/// partial bundle cannot masquerade as a skip.
+fn vectors_present() -> bool {
+    vectors_dir().join("manifest.json").is_file()
+}
+
+macro_rules! require_vectors {
+    () => {
+        if !vectors_present() {
+            eprintln!(
+                "SKIP {}: spec vectors not found at {} — set the \
+                 Mega_ScorpioFS_MST2_Specs bundle beside the crate to run it",
+                module_path!(),
+                vectors_dir().display()
+            );
+            return;
+        }
+    };
+}
+
 fn read(file: &str) -> Vec<u8> {
     std::fs::read(vectors_dir().join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"))
 }
@@ -60,6 +88,7 @@ fn vector_row(m: &Value, file: &str) -> Value {
 
 #[test]
 fn mtp2_vectors_parse_reencode_and_page_id() {
+    require_vectors!();
     let m = manifest();
     for file in [
         "metadata-empty.bin",
@@ -128,6 +157,7 @@ fn mtp2_vectors_parse_reencode_and_page_id() {
 
 #[test]
 fn wide_directory_root_is_branch_with_child_links() {
+    require_vectors!();
     let m = manifest();
     let root_id = hex_to_32(m["wide_directory_root"].as_str().unwrap());
     let mut total_by_file: Vec<(&str, [u8; 32])> = Vec::new();
@@ -162,6 +192,7 @@ fn wide_directory_root_is_branch_with_child_links() {
 
 #[test]
 fn serving_descriptor_vector() {
+    require_vectors!();
     let m = manifest();
     let bytes = read("descriptor.bin");
     assert_eq!(
@@ -192,6 +223,7 @@ fn serving_descriptor_vector() {
 
 #[test]
 fn object_stream_vector() {
+    require_vectors!();
     let bytes = read("object-stream.bin");
     let frames = parse_stream(&bytes).unwrap();
     assert_eq!(frames.len(), 2);
@@ -221,6 +253,7 @@ fn object_stream_vector() {
 
 #[test]
 fn metadata_stream_vector() {
+    require_vectors!();
     let m = manifest();
     let bytes = read("metadata-stream.bin");
     let frames = parse_stream(&bytes).unwrap();
@@ -247,6 +280,7 @@ fn metadata_stream_vector() {
 
 #[test]
 fn chunk_vector_group() {
+    require_vectors!();
     let m = manifest();
     // Single CHUNK frame (stream 21, no END in this vector).
     let frame_bytes = read("chunk-frame.bin");
