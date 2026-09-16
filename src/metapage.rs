@@ -697,7 +697,7 @@ mod tests {
             .map(|i| {
                 Entry::file(
                     EntryKind::Regular,
-                    format!("{:032x}", i).as_bytes(),
+                    format!("{i:032x}").as_bytes(),
                     1,
                     cid(1),
                 )
