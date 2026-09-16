@@ -761,7 +761,6 @@ mod tests {
         let (frame, _) = parse_frame(&bytes).unwrap();
         assert_eq!(frame, Frame::End(p));
         // 49 bytes must be rejected.
-        let mut bytes = bytes;
         let mut payload = Vec::new();
         crate::write_u32(&mut payload, 2);
         crate::write_u32(&mut payload, 2);
@@ -770,7 +769,6 @@ mod tests {
         payload.push(0);
         let bad = frame_bytes(KIND_END, &payload, sid(), 1);
         assert!(parse_frame(&bad).is_err());
-        let _ = bytes;
     }
 
     #[test]

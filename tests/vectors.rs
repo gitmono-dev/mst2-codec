@@ -192,7 +192,6 @@ fn serving_descriptor_vector() {
 
 #[test]
 fn object_stream_vector() {
-    let m = manifest();
     let bytes = read("object-stream.bin");
     let frames = parse_stream(&bytes).unwrap();
     assert_eq!(frames.len(), 2);
