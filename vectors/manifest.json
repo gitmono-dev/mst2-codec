@@ -1,0 +1,107 @@
+{
+  "generator": "reference/generate_vectors.py",
+  "independent_oracle": false,
+  "notice": "Synthetic fixtures. namespace_view_id is a labelled fixture digest, not a real NamespaceView encoding. These vectors do not prove publisher/source correctness.",
+  "wide_directory_root": "sha256:af2b47eec530409ec70a6607bea490912e20b520a01507aa8bc4cf256f4fc4b9",
+  "vectors": [
+    {
+      "file": "metadata-empty.bin",
+      "kind": "MTP2",
+      "byte_length": 20,
+      "sha256_file": "d87d4ab4f5f0c28ed51d89a534ee1a9bbc2fe1e33c05cd0c609c6fb5290595e4",
+      "semantic_id": "sha256:02e708fb22f963940f0f49d2d2388a59468204bf6e66c6e19cee25a978a675dc"
+    },
+    {
+      "file": "metadata-root.bin",
+      "kind": "MTP2",
+      "byte_length": 258,
+      "sha256_file": "40f971fe085a65c1c147ad5096a1b59f6d3ef6e4b0ae8aae5cc42cd9e135ebe6",
+      "semantic_id": "sha256:4a24ad330e3a44fb48a63997566f488407c23567780e94b85c26604fb87bc778"
+    },
+    {
+      "file": "metadata-src.bin",
+      "kind": "MTP2",
+      "byte_length": 69,
+      "sha256_file": "f626fd8b4f14e16a179d699c89ea722844879d4b21fec3cfd1acb8775ee9a755",
+      "semantic_id": "sha256:2c1bc378e4f7296ff23debeba29f2096cb4eda6a5ba7c57f1de687a8084e6d46"
+    },
+    {
+      "file": "metadata-wide-00.bin",
+      "kind": "MTP2",
+      "byte_length": 2060,
+      "sha256_file": "b6d147b9281ec8536830672238205a2e06bc2d7f805c3bd9c8895d12d6e60ea8",
+      "semantic_id": "sha256:4904fb80e7e15799456087522953117a82c4bf2b8aa23f9254f65a5576ca1f8f"
+    },
+    {
+      "file": "metadata-wide-01.bin",
+      "kind": "MTP2",
+      "byte_length": 107,
+      "sha256_file": "0cc09ba72da05061a0d4378c413fb68c9c6202c5ddf229fad445db6698aa447b",
+      "semantic_id": "sha256:af2b47eec530409ec70a6607bea490912e20b520a01507aa8bc4cf256f4fc4b9"
+    },
+    {
+      "file": "metadata-wide-02.bin",
+      "kind": "MTP2",
+      "byte_length": 5120,
+      "sha256_file": "5943687c934c9575c35615619df6d6814c03cf41336ccc03e3a0ae6387a2dd9c",
+      "semantic_id": "sha256:bb4e74fb1999db1c658804a3759403f06767c8aec73c7ea50eaddcca20f85d40"
+    },
+    {
+      "file": "descriptor.bin",
+      "kind": "ServingDescriptor",
+      "byte_length": 110,
+      "sha256_file": "dcff178dc5bb130f17694fbde681d88c5b263d2c2d32897cc370047a8c30ccc4",
+      "semantic_id": "sha256:f94af7bddec0603b40dbf5c2b17952bbfef30093af9f5653734ac05983cbbfee"
+    },
+    {
+      "file": "objects-request-body.json",
+      "kind": "HTTP request body",
+      "byte_length": 236,
+      "sha256_file": "7d1182742368efd050ad2dd78441c26f2f6aac9ae62847b71c76e928ff6a36aa"
+    },
+    {
+      "file": "object-frame.bin",
+      "kind": "OBJECT frame",
+      "byte_length": 189,
+      "sha256_file": "c9fd0233d2fccd048d8c9da1981508e4e3377f2a1a79873224add135b8eb0753"
+    },
+    {
+      "file": "object-stream.bin",
+      "kind": "OBJECT stream",
+      "byte_length": 301,
+      "sha256_file": "beda80b8931b957e65d681682e492d1cd7468afb5330be05d38f9e46265d0493"
+    },
+    {
+      "file": "metadata-request-body.json",
+      "kind": "HTTP request body",
+      "byte_length": 137,
+      "sha256_file": "f67942c06accbf8e64821c3ea71e4ab9762e9e418d15b3f464abb9ee571a6670"
+    },
+    {
+      "file": "metadata-stream.bin",
+      "kind": "META stream",
+      "byte_length": 474,
+      "sha256_file": "0ea87de6f0606202c20648a83715caabfadd2e158b4a07f0c8f5d29b41075181"
+    },
+    {
+      "file": "chunk-map.bin",
+      "kind": "ChunkMap",
+      "byte_length": 100,
+      "sha256_file": "b40cfc51b9faa3c0615b3aaeba1a0570ec468ef79855a86650ed3b06dca90a44",
+      "semantic_id": "sha256:380018a4d799e78dcfe7e1faa75a5b0b306ef170cc799711233546538f56af79"
+    },
+    {
+      "file": "chunk-map-leaf.bin",
+      "kind": "ChunkMapLeaf",
+      "byte_length": 48,
+      "sha256_file": "d4b83579eecbbb493569b93e3ed4f64a20ea07cb0120258c2f84f2252c94bd9c",
+      "semantic_id": "sha256:55e79e562d3cbc2afa0cd317e1ed0f9e81d01c07a96605bf370eea3d1d9ebc25"
+    },
+    {
+      "file": "chunk-frame.bin",
+      "kind": "CHUNK frame",
+      "byte_length": 300140,
+      "sha256_file": "9e31c39d377bb527cbe3f0cfed31de2926c2db384b1de896a0e970b81303ca98"
+    }
+  ]
+}
