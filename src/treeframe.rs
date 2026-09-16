@@ -118,11 +118,15 @@ pub fn parse_frame(buf: &[u8]) -> CodecResult<(Frame, usize)> {
         return Err(CodecError::BadConstant("END/ERROR must not be compressed"));
     }
     if flags & FLAG_ZSTD == 0 && wire_len != raw_len {
-        return Err(CodecError::BadLength("identity encoding requires wire_len == raw_len"));
+        return Err(CodecError::BadLength(
+            "identity encoding requires wire_len == raw_len",
+        ));
     }
     if flags & FLAG_ZSTD != 0 {
         // zstd negotiation is transport-level; this codec handles identity only.
-        return Err(CodecError::Unsupported("zstd flag set; identity codec only"));
+        return Err(CodecError::Unsupported(
+            "zstd flag set; identity codec only",
+        ));
     }
 
     let total = HEADER_LEN + wire_len as usize;
@@ -167,11 +171,15 @@ pub fn parse_stream(buf: &[u8]) -> CodecResult<Vec<Frame>> {
         let seq = read_u64(&buf[off - used..], 24)?;
         match stream_id {
             None => stream_id = Some(sid),
-            Some(s) if s != sid => return Err(CodecError::BadOrdering("stream_id changed mid-stream")),
+            Some(s) if s != sid => {
+                return Err(CodecError::BadOrdering("stream_id changed mid-stream"))
+            }
             _ => {}
         }
         if seq != expect_seq {
-            return Err(CodecError::BadOrdering("sequence must increase consecutively from 0"));
+            return Err(CodecError::BadOrdering(
+                "sequence must increase consecutively from 0",
+            ));
         }
         expect_seq += 1;
         if matches!(frame, Frame::End(_) | Frame::Error(_)) {
@@ -204,7 +212,11 @@ fn decode_meta(payload: &[u8]) -> CodecResult<MetaPayload> {
     let mut seen: Vec<[u8; 32]> = Vec::with_capacity(count);
     for _ in 0..count {
         let mut pid = [0u8; 32];
-        pid.copy_from_slice(payload.get(off..off + 32).ok_or(CodecError::Truncated("page_id"))?);
+        pid.copy_from_slice(
+            payload
+                .get(off..off + 32)
+                .ok_or(CodecError::Truncated("page_id"))?,
+        );
         off += 32;
         let page_len = read_u32(payload, off)? as usize;
         off += 4;
@@ -275,7 +287,9 @@ fn decode_object(payload: &[u8]) -> CodecResult<ObjectPayload> {
         seen.push(cid);
         let start = data_offset as usize;
         let end = start + object_len as usize;
-        let bytes = data.get(start..end).ok_or(CodecError::Truncated("object data"))?;
+        let bytes = data
+            .get(start..end)
+            .ok_or(CodecError::Truncated("object data"))?;
         // Verify the full content digest.
         if sha256(&[bytes]) != cid {
             return Err(CodecError::DigestMismatch("object content"));
@@ -317,7 +331,9 @@ fn decode_chunk(payload: &[u8], raw_len: u32) -> CodecResult<ChunkPayload> {
 
 fn decode_end(payload: &[u8]) -> CodecResult<EndPayload> {
     if payload.len() != 48 {
-        return Err(CodecError::BadLength("END payload must be exactly 48 bytes"));
+        return Err(CodecError::BadLength(
+            "END payload must be exactly 48 bytes",
+        ));
     }
     let mut h = [0u8; 32];
     h.copy_from_slice(&payload[16..48]);
@@ -383,11 +399,15 @@ fn parse_error_json(s: &str) -> CodecResult<ErrorPayload> {
     if !it.eof() {
         return Err(CodecError::BadConstant("ERROR json trailing data"));
     }
-    let code = fields[0].take().ok_or(CodecError::BadConstant("ERROR code missing"))?;
-    let retryable_raw =
-        fields[1].take().ok_or(CodecError::BadConstant("ERROR retryable missing"))?;
-    let request_id =
-        fields[2].take().ok_or(CodecError::BadConstant("ERROR request_id missing"))?;
+    let code = fields[0]
+        .take()
+        .ok_or(CodecError::BadConstant("ERROR code missing"))?;
+    let retryable_raw = fields[1]
+        .take()
+        .ok_or(CodecError::BadConstant("ERROR retryable missing"))?;
+    let request_id = fields[2]
+        .take()
+        .ok_or(CodecError::BadConstant("ERROR request_id missing"))?;
     Ok(ErrorPayload {
         code,
         retryable: retryable_raw == "true",
@@ -404,7 +424,10 @@ struct JsonScan<'a> {
 
 impl<'a> JsonScan<'a> {
     fn new(s: &'a str) -> Self {
-        JsonScan { b: s.as_bytes(), i: 0 }
+        JsonScan {
+            b: s.as_bytes(),
+            i: 0,
+        }
     }
     fn eof(&self) -> bool {
         self.i >= self.b.len()
@@ -428,12 +451,18 @@ impl<'a> JsonScan<'a> {
         }
         let mut out = Vec::new();
         loop {
-            let c = *self.b.get(self.i).ok_or(CodecError::Truncated("json string"))?;
+            let c = *self
+                .b
+                .get(self.i)
+                .ok_or(CodecError::Truncated("json string"))?;
             self.i += 1;
             match c {
                 b'"' => break,
                 b'\\' => {
-                    let e = *self.b.get(self.i).ok_or(CodecError::Truncated("json escape"))?;
+                    let e = *self
+                        .b
+                        .get(self.i)
+                        .ok_or(CodecError::Truncated("json escape"))?;
                     self.i += 1;
                     match e {
                         b'"' => out.push(b'"'),
@@ -461,7 +490,9 @@ impl<'a> JsonScan<'a> {
                         _ => return Err(CodecError::BadConstant("json escape")),
                     }
                 }
-                0x00..=0x1F => return Err(CodecError::BadConstant("raw control char in json string")),
+                0x00..=0x1F => {
+                    return Err(CodecError::BadConstant("raw control char in json string"))
+                }
                 _ => out.push(c),
             }
         }
@@ -486,8 +517,15 @@ fn s(b: &[u8]) -> &str {
 
 // ---------------------------------------------------------------- encoding
 
-fn header(kind: u8, flags: u8, wire_len: u32, raw_len: u32, stream_id: u32, sequence: u64,
-    payload_sha256: [u8; 32]) -> Vec<u8> {
+fn header(
+    kind: u8,
+    flags: u8,
+    wire_len: u32,
+    raw_len: u32,
+    stream_id: u32,
+    sequence: u64,
+    payload_sha256: [u8; 32],
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN);
     out.extend_from_slice(b"MST2");
     crate::write_u16(&mut out, VERSION);
@@ -504,8 +542,15 @@ fn header(kind: u8, flags: u8, wire_len: u32, raw_len: u32, stream_id: u32, sequ
 
 fn frame_bytes(kind: u8, payload: &[u8], stream_id: u32, sequence: u64) -> Vec<u8> {
     let digest = sha256(&[payload]);
-    let mut out = header(kind, 0, payload.len() as u32, payload.len() as u32, stream_id,
-        sequence, digest);
+    let mut out = header(
+        kind,
+        0,
+        payload.len() as u32,
+        payload.len() as u32,
+        stream_id,
+        sequence,
+        digest,
+    );
     out.extend_from_slice(payload);
     out
 }
@@ -552,7 +597,9 @@ impl ObjectPayload {
             payload.extend_from_slice(cid);
             crate::write_u32(&mut payload, data.len() as u32);
             crate::write_u32(&mut payload, off);
-            off = off.checked_add(data.len() as u32).ok_or(CodecError::Overflow("offset"))?;
+            off = off
+                .checked_add(data.len() as u32)
+                .ok_or(CodecError::Overflow("offset"))?;
         }
         for (_, data) in &self.objects {
             payload.extend_from_slice(data);
@@ -604,7 +651,12 @@ impl ErrorPayload {
         if payload.len() > ERROR_MAX_BYTES {
             return Err(CodecError::BadLength("ERROR payload over 4096 bytes"));
         }
-        Ok(frame_bytes(KIND_ERROR, payload.as_bytes(), stream_id, sequence))
+        Ok(frame_bytes(
+            KIND_ERROR,
+            payload.as_bytes(),
+            stream_id,
+            sequence,
+        ))
     }
 }
 
@@ -636,15 +688,19 @@ mod tests {
     }
 
     fn sample_page() -> Vec<u8> {
-        Page::Leaf { entries: vec![Entry::file(EntryKind::Regular, b"a", 1, [9; 32])] }
-            .encode()
-            .unwrap()
+        Page::Leaf {
+            entries: vec![Entry::file(EntryKind::Regular, b"a", 1, [9; 32])],
+        }
+        .encode()
+        .unwrap()
     }
 
     #[test]
     fn meta_frame_roundtrip() {
         let page = sample_page();
-        let p = MetaPayload { pages: vec![(page_id(&page), page)] };
+        let p = MetaPayload {
+            pages: vec![(page_id(&page), page)],
+        };
         let bytes = p.encode(sid(), 0).unwrap();
         let (frame, used) = parse_frame(&bytes).unwrap();
         assert_eq!(used, bytes.len());
@@ -655,7 +711,9 @@ mod tests {
     fn object_frame_roundtrip_and_digest() {
         let d1 = crate::sha256(&[b"hello"]);
         let d2 = crate::sha256(&[b""]);
-        let p = ObjectPayload { objects: vec![(d1, b"hello".to_vec()), (d2, vec![])] };
+        let p = ObjectPayload {
+            objects: vec![(d1, b"hello".to_vec()), (d2, vec![])],
+        };
         let bytes = p.encode(sid(), 0).unwrap();
         let (frame, _) = parse_frame(&bytes).unwrap();
         assert_eq!(frame, Frame::Object(p));
@@ -740,7 +798,9 @@ mod tests {
     fn stream_rules() {
         let page = sample_page();
         let page_len = page.len();
-        let meta = MetaPayload { pages: vec![(page_id(&page), page)] };
+        let meta = MetaPayload {
+            pages: vec![(page_id(&page), page)],
+        };
         let end = EndPayload {
             request_item_count: 1,
             unique_unit_count: 1,
@@ -792,6 +852,9 @@ mod tests {
         let mut bytes = p.encode(sid(), 0);
         let n = bytes.len();
         bytes[n - 1] ^= 1;
-        assert!(matches!(parse_frame(&bytes), Err(CodecError::DigestMismatch(_))));
+        assert!(matches!(
+            parse_frame(&bytes),
+            Err(CodecError::DigestMismatch(_))
+        ));
     }
 }

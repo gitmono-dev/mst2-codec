@@ -7,8 +7,10 @@
 //!
 //! `page_id = SHA256(b"mega.mst2.metapage\0" || entire_page_bytes)`.
 
-use crate::{read_u16, read_u32, read_u64, sha256, validate_name, write_u16, write_u32, write_u64,
-    CodecError, CodecResult};
+use crate::{
+    read_u16, read_u32, read_u64, sha256, validate_name, write_u16, write_u32, write_u64,
+    CodecError, CodecResult,
+};
 
 pub const LEAF_MAX_ENTRIES: usize = 128;
 pub const PAGE_MAX_BYTES: usize = 16384;
@@ -59,12 +61,27 @@ pub struct Entry {
 
 impl Entry {
     pub fn file(kind: EntryKind, name: &[u8], size: u64, content_id: [u8; 32]) -> Self {
-        debug_assert!(matches!(kind, EntryKind::Regular | EntryKind::Executable | EntryKind::Symlink));
-        Entry { kind, name: name.to_vec(), size, content_id, child_root: [0; 32] }
+        debug_assert!(matches!(
+            kind,
+            EntryKind::Regular | EntryKind::Executable | EntryKind::Symlink
+        ));
+        Entry {
+            kind,
+            name: name.to_vec(),
+            size,
+            content_id,
+            child_root: [0; 32],
+        }
     }
 
     pub fn dir(name: &[u8], child_root: [u8; 32]) -> Self {
-        Entry { kind: EntryKind::Directory, name: name.to_vec(), size: 0, content_id: [0; 32], child_root }
+        Entry {
+            kind: EntryKind::Directory,
+            name: name.to_vec(),
+            size: 0,
+            content_id: [0; 32],
+            child_root,
+        }
     }
 
     pub fn is_dir(&self) -> bool {
@@ -101,7 +118,9 @@ impl Entry {
             // Spec: empty directory is an empty LEAF page; a directory entry
             // cannot alias a zero digest as a substitute for that page.
             if self.child_root == [0u8; 32] {
-                return Err(CodecError::DigestMismatch("directory child_root is all-zero"));
+                return Err(CodecError::DigestMismatch(
+                    "directory child_root is all-zero",
+                ));
             }
         } else if self.name == b"." || self.name == b".." {
             return Err(CodecError::BadName("dot entry"));
@@ -129,19 +148,33 @@ impl Entry {
         let entry = if kind == EntryKind::Directory {
             let mut child_root = [0u8; 32];
             child_root.copy_from_slice(
-                buf.get(*off..*off + 32).ok_or(CodecError::Truncated("child_root"))?,
+                buf.get(*off..*off + 32)
+                    .ok_or(CodecError::Truncated("child_root"))?,
             );
             *off += 32;
-            Entry { kind, name, size: 0, content_id: [0; 32], child_root }
+            Entry {
+                kind,
+                name,
+                size: 0,
+                content_id: [0; 32],
+                child_root,
+            }
         } else {
             let size = read_u64(buf, *off)?;
             *off += 8;
             let mut content_id = [0u8; 32];
             content_id.copy_from_slice(
-                buf.get(*off..*off + 32).ok_or(CodecError::Truncated("content_id"))?,
+                buf.get(*off..*off + 32)
+                    .ok_or(CodecError::Truncated("content_id"))?,
             );
             *off += 32;
-            Entry { kind, name, size, content_id, child_root: [0; 32] }
+            Entry {
+                kind,
+                name,
+                size,
+                content_id,
+                child_root: [0; 32],
+            }
         };
         entry.validate()?;
         Ok(entry)
@@ -159,8 +192,14 @@ pub struct BranchChild {
 /// A decoded MTP2 page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
-    Leaf { entries: Vec<Entry> },
-    Branch { prefix: Vec<u8>, terminal: Option<Entry>, children: Vec<BranchChild> },
+    Leaf {
+        entries: Vec<Entry>,
+    },
+    Branch {
+        prefix: Vec<u8>,
+        terminal: Option<Entry>,
+        children: Vec<BranchChild>,
+    },
 }
 
 /// `page_id` of a full page (header + payload).
@@ -194,7 +233,9 @@ impl Page {
         }
         let payload_len = read_u32(page_bytes, 16)? as usize;
         if page_bytes.len() != HEADER_LEN + payload_len {
-            return Err(CodecError::BadLength("payload_len must cover exactly the page"));
+            return Err(CodecError::BadLength(
+                "payload_len must cover exactly the page",
+            ));
         }
         let payload = &page_bytes[HEADER_LEN..];
         match page_kind {
@@ -277,10 +318,16 @@ impl Page {
                     off += 8;
                     let mut child_page_id = [0u8; 32];
                     child_page_id.copy_from_slice(
-                        payload.get(off..off + 32).ok_or(CodecError::Truncated("child_page_id"))?,
+                        payload
+                            .get(off..off + 32)
+                            .ok_or(CodecError::Truncated("child_page_id"))?,
                     );
                     off += 32;
-                    children.push(BranchChild { label, subtree_entries, child_page_id });
+                    children.push(BranchChild {
+                        label,
+                        subtree_entries,
+                        child_page_id,
+                    });
                 }
                 if off != payload.len() {
                     return Err(CodecError::BadLength("trailing bytes in branch payload"));
@@ -300,7 +347,14 @@ impl Page {
                         "branch total_entries != terminal + sum(children)",
                     ));
                 }
-                Ok((Page::Branch { prefix, terminal, children }, total_entries))
+                Ok((
+                    Page::Branch {
+                        prefix,
+                        terminal,
+                        children,
+                    },
+                    total_entries,
+                ))
             }
             _ => Err(CodecError::BadConstant("page_kind")),
         }
@@ -319,7 +373,9 @@ impl Page {
                     e.validate()?;
                     if let Some(p) = prev {
                         if p >= e.name.as_slice() {
-                            return Err(CodecError::BadOrdering("leaf entries not strictly ascending"));
+                            return Err(CodecError::BadOrdering(
+                                "leaf entries not strictly ascending",
+                            ));
                         }
                     }
                     prev = Some(&e.name);
@@ -327,7 +383,11 @@ impl Page {
                 }
                 (0, entries.len(), entries.len() as u64)
             }
-            Page::Branch { prefix, terminal, children } => {
+            Page::Branch {
+                prefix,
+                terminal,
+                children,
+            } => {
                 write_u16(&mut payload, prefix.len() as u16);
                 payload.extend_from_slice(prefix);
                 if let Some(t) = terminal {
@@ -345,13 +405,17 @@ impl Page {
                 for c in children {
                     if let Some(p) = prev_label {
                         if c.label <= p {
-                            return Err(CodecError::BadOrdering("child labels not strictly ascending"));
+                            return Err(CodecError::BadOrdering(
+                                "child labels not strictly ascending",
+                            ));
                         }
                     }
                     if c.subtree_entries == 0 {
                         return Err(CodecError::BadOrdering("branch child must be non-empty"));
                     }
-                    sum = sum.checked_add(c.subtree_entries).ok_or(CodecError::Overflow("sum"))?;
+                    sum = sum
+                        .checked_add(c.subtree_entries)
+                        .ok_or(CodecError::Overflow("sum"))?;
                     prev_label = Some(c.label);
                     payload.push(c.label);
                     write_u64(&mut payload, c.subtree_entries);
@@ -383,7 +447,9 @@ impl Page {
     pub fn total_entries(&self) -> u64 {
         match self {
             Page::Leaf { entries } => entries.len() as u64,
-            Page::Branch { terminal, children, .. } => {
+            Page::Branch {
+                terminal, children, ..
+            } => {
                 terminal.iter().count() as u64
                     + children.iter().map(|c| c.subtree_entries).sum::<u64>()
             }
@@ -415,13 +481,17 @@ impl Page {
             e.validate()?;
             if let Some(p) = prev {
                 if p >= e.name.as_slice() {
-                    return Err(CodecError::BadOrdering("build input must be strictly ascending"));
+                    return Err(CodecError::BadOrdering(
+                        "build input must be strictly ascending",
+                    ));
                 }
             }
             prev = Some(&e.name);
         }
         if entries.len() <= LEAF_MAX_ENTRIES {
-            let leaf = Page::Leaf { entries: entries.to_vec() };
+            let leaf = Page::Leaf {
+                entries: entries.to_vec(),
+            };
             let bytes = leaf.encode()?;
             if bytes.len() <= PAGE_MAX_BYTES {
                 return Ok(bytes);
@@ -451,7 +521,9 @@ impl Page {
         if groups.len() + terminal.iter().count() < 2 {
             // Cannot happen when p is the true LCP, but refuse a wrong split
             // instead of emitting an invalid branch.
-            return Err(CodecError::BadOrdering("partition produced fewer than two groups"));
+            return Err(CodecError::BadOrdering(
+                "partition produced fewer than two groups",
+            ));
         }
         for (label, group) in groups {
             let bytes = Page::build(&group)?;
@@ -461,7 +533,11 @@ impl Page {
                 child_page_id: page_id(&bytes),
             });
         }
-        let branch = Page::Branch { prefix: p, terminal, children };
+        let branch = Page::Branch {
+            prefix: p,
+            terminal,
+            children,
+        };
         branch.encode()
     }
 }
@@ -494,9 +570,18 @@ mod tests {
             Entry::file(EntryKind::Executable, b"run.sh", 100, cid(2)),
             Entry::dir(b"sub", cid(4)),
         ];
-        let bytes = Page::Leaf { entries: entries.clone() }.encode().unwrap();
+        let bytes = Page::Leaf {
+            entries: entries.clone(),
+        }
+        .encode()
+        .unwrap();
         let (page, total) = Page::decode(&bytes).unwrap();
-        assert_eq!(page, Page::Leaf { entries: entries.clone() });
+        assert_eq!(
+            page,
+            Page::Leaf {
+                entries: entries.clone()
+            }
+        );
         assert_eq!(total, 4);
         // Canonical Build of the same set must reproduce the leaf bytes.
         assert_eq!(Page::build(&entries).unwrap(), bytes);
@@ -532,7 +617,11 @@ mod tests {
         let entries: Vec<Entry> = (0..129u32)
             .map(|i| Entry::file(EntryKind::Regular, format!("n{i:03}").as_bytes(), 1, cid(1)))
             .collect();
-        assert!(Page::Leaf { entries: entries.clone() }.encode().is_err());
+        assert!(Page::Leaf {
+            entries: entries.clone()
+        }
+        .encode()
+        .is_err());
         // Build must split into a branch; entries are already sorted.
         let root = Page::build(&entries).unwrap();
         let (page, total) = Page::decode(&root).unwrap();
@@ -544,7 +633,14 @@ mod tests {
     fn different_insertion_order_same_root() {
         // META-07: build from the same set in different orders gives one root.
         let mut a: Vec<Entry> = (0..200u32)
-            .map(|i| Entry::file(EntryKind::Regular, format!("entry-{i:04}").as_bytes(), i as u64, cid((i % 251) as u8)))
+            .map(|i| {
+                Entry::file(
+                    EntryKind::Regular,
+                    format!("entry-{i:04}").as_bytes(),
+                    i as u64,
+                    cid((i % 251) as u8),
+                )
+            })
             .collect();
         let mut b = a.clone();
         a.reverse();
@@ -561,7 +657,14 @@ mod tests {
         // META-08: changing one file keeps sibling pages byte-identical.
         let mk = |v: u8| -> Vec<Entry> {
             let mut es: Vec<Entry> = (0..300u32)
-                .map(|i| Entry::file(EntryKind::Regular, format!("f{i:04}").as_bytes(), i as u64, cid((i % 251) as u8)))
+                .map(|i| {
+                    Entry::file(
+                        EntryKind::Regular,
+                        format!("f{i:04}").as_bytes(),
+                        i as u64,
+                        cid((i % 251) as u8),
+                    )
+                })
                 .collect();
             if v == 1 {
                 es[299] = Entry::file(EntryKind::Regular, b"f0299", 999, cid(250));
@@ -600,7 +703,11 @@ mod tests {
                 )
             })
             .collect();
-        let leaf = Page::Leaf { entries: entries.clone() }.encode().unwrap();
+        let leaf = Page::Leaf {
+            entries: entries.clone(),
+        }
+        .encode()
+        .unwrap();
         if leaf.len() > PAGE_MAX_BYTES {
             let root = Page::build(&entries).unwrap();
             let (page, _) = Page::decode(&root).unwrap();
@@ -617,9 +724,11 @@ mod tests {
     #[test]
     fn branch_tampering_detected_by_page_id() {
         // META-09: any bit change changes page_id.
-        let bytes = Page::Leaf { entries: vec![Entry::file(EntryKind::Regular, b"a", 1, cid(1))] }
-            .encode()
-            .unwrap();
+        let bytes = Page::Leaf {
+            entries: vec![Entry::file(EntryKind::Regular, b"a", 1, cid(1))],
+        }
+        .encode()
+        .unwrap();
         let id = page_id(&bytes);
         let mut bytes2 = bytes.clone();
         *bytes2.last_mut().unwrap() ^= 1;

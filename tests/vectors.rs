@@ -27,10 +27,8 @@ fn read(file: &str) -> Vec<u8> {
 }
 
 fn manifest() -> Value {
-    let v: Value = serde_json::from_str(
-        &String::from_utf8(read("manifest.json")).unwrap(),
-    )
-    .unwrap();
+    let v: Value =
+        serde_json::from_str(&String::from_utf8(read("manifest.json")).unwrap()).unwrap();
     v
 }
 
@@ -81,7 +79,9 @@ fn mtp2_vectors_parse_reencode_and_page_id() {
         assert_eq!(bytes.len(), row["byte_length"].as_u64().unwrap() as usize);
         let (page, total) = Page::decode(&bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
         // Canonical roundtrip: re-encoding a valid page must be byte-exact.
-        let re = page.encode().unwrap_or_else(|e| panic!("{file}: reencode {e}"));
+        let re = page
+            .encode()
+            .unwrap_or_else(|e| panic!("{file}: reencode {e}"));
         assert_eq!(re, bytes, "{file}: re-encode is not byte-identical");
         // page_id must match the manifest semantic id.
         let pid = page_id(&bytes);
@@ -95,8 +95,7 @@ fn mtp2_vectors_parse_reencode_and_page_id() {
             assert_eq!(total, 5);
             match page {
                 Page::Leaf { entries } => {
-                    let names: Vec<&[u8]> =
-                        entries.iter().map(|e| e.name.as_slice()).collect();
+                    let names: Vec<&[u8]> = entries.iter().map(|e| e.name.as_slice()).collect();
                     assert_eq!(
                         names,
                         vec![&b"README.md"[..], b"large.bin", b"link", b"run.sh", b"src"]
@@ -167,12 +166,22 @@ fn serving_descriptor_vector() {
     let bytes = read("descriptor.bin");
     assert_eq!(
         sha256_file(&bytes),
-        hex_to_32(vector_row(&m, "descriptor.bin")["sha256_file"].as_str().unwrap())
+        hex_to_32(
+            vector_row(&m, "descriptor.bin")["sha256_file"]
+                .as_str()
+                .unwrap()
+        )
     );
     let d = ServingDescriptor::decode(&bytes).unwrap();
     assert_eq!(d.scope, "/project/app");
-    assert_eq!(d.snapshot_id().unwrap(),
-        hex_to_32(vector_row(&m, "descriptor.bin")["semantic_id"].as_str().unwrap()));
+    assert_eq!(
+        d.snapshot_id().unwrap(),
+        hex_to_32(
+            vector_row(&m, "descriptor.bin")["semantic_id"]
+                .as_str()
+                .unwrap()
+        )
+    );
     // Generator used instance 11111111-2222-4333-8444-555555555555.
     assert_eq!(d.instance_uuid[0], 0x11);
     assert_eq!(d.instance_uuid[15], 0x55);
@@ -260,7 +269,11 @@ fn chunk_vector_group() {
     assert_eq!(map.map_id(), map_id, "CHUNK frame map_id must bind the map");
     assert_eq!(
         map.map_id(),
-        hex_to_32(vector_row(&m, "chunk-map.bin")["semantic_id"].as_str().unwrap())
+        hex_to_32(
+            vector_row(&m, "chunk-map.bin")["semantic_id"]
+                .as_str()
+                .unwrap()
+        )
     );
     assert_eq!(map.file_size, 300000);
     assert_eq!(map.chunk_count, 1);
@@ -275,10 +288,15 @@ fn chunk_vector_group() {
     assert_eq!(
         l0,
         hex_to_32(
-            vector_row(&m, "chunk-map-leaf.bin")["semantic_id"].as_str().unwrap()
+            vector_row(&m, "chunk-map-leaf.bin")["semantic_id"]
+                .as_str()
+                .unwrap()
         )
     );
-    assert_eq!(mst2_codec::chunkmap::merkle_root(&[l0]).unwrap(), map.pages_root);
+    assert_eq!(
+        mst2_codec::chunkmap::merkle_root(&[l0]).unwrap(),
+        map.pages_root
+    );
     // Proof verification for the single-leaf tree (empty proof).
     mst2_codec::chunkmap::verify_leaf(1, 0, l0, &[], map.pages_root).unwrap();
 }

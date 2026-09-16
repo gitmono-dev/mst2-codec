@@ -4,8 +4,9 @@
 //! individually authenticated read layout for files > 256 KiB. Fixed chunk
 //! size 1 MiB; pages hold up to 256 chunk digests each.
 
-use crate::{read_u16, read_u32, read_u64, sha256, write_u16, write_u32, write_u64,
-    CodecError, CodecResult};
+use crate::{
+    read_u16, read_u32, read_u64, sha256, write_u16, write_u32, write_u64, CodecError, CodecResult,
+};
 
 pub const CHUNK_SIZE: u32 = 1_048_576;
 pub const CHUNKS_PER_PAGE: usize = 256;
@@ -53,10 +54,16 @@ pub enum ProofSide {
 }
 
 impl ChunkMap {
-    pub fn new(file_content_id: [u8; 32], file_size: u64, pages_root: [u8; 32]) -> CodecResult<Self> {
+    pub fn new(
+        file_content_id: [u8; 32],
+        file_size: u64,
+        pages_root: [u8; 32],
+    ) -> CodecResult<Self> {
         if file_size == 0 {
             // Empty files do not use a map.
-            return Err(CodecError::BadLength("empty file must not have a chunk map"));
+            return Err(CodecError::BadLength(
+                "empty file must not have a chunk map",
+            ));
         }
         let chunk_count = file_size.div_ceil(CHUNK_SIZE as u64);
         let page_count = chunk_count.div_ceil(CHUNKS_PER_PAGE as u64);
@@ -102,18 +109,24 @@ impl ChunkMap {
         let file_size = read_u64(buf, 40)?;
         let chunk_size = read_u32(buf, 48)?;
         if chunk_size != CHUNK_SIZE {
-            return Err(CodecError::BadConstant("only chunk_size 1MiB accepted this profile"));
+            return Err(CodecError::BadConstant(
+                "only chunk_size 1MiB accepted this profile",
+            ));
         }
         let chunk_count = read_u64(buf, 52)?;
         let page_count = read_u64(buf, 60)?;
         let mut pages_root = [0u8; 32];
         pages_root.copy_from_slice(&buf[68..100]);
         if file_size == 0 {
-            return Err(CodecError::BadLength("empty file must not have a chunk map"));
+            return Err(CodecError::BadLength(
+                "empty file must not have a chunk map",
+            ));
         }
         let expect_chunks = file_size.div_ceil(CHUNK_SIZE as u64);
         if chunk_count != expect_chunks {
-            return Err(CodecError::BadLength("chunk_count != ceil(file_size/chunk_size)"));
+            return Err(CodecError::BadLength(
+                "chunk_count != ceil(file_size/chunk_size)",
+            ));
         }
         if chunk_count == 0 {
             return Err(CodecError::BadLength("chunk_count must be at least 1"));
@@ -198,7 +211,10 @@ impl ChunkLeaf {
             d.copy_from_slice(&buf[16 + i * 32..16 + (i + 1) * 32]);
             chunk_sha256.push(d);
         }
-        Ok(ChunkLeaf { page_index, chunk_sha256 })
+        Ok(ChunkLeaf {
+            page_index,
+            chunk_sha256,
+        })
     }
 
     /// `L_i = SHA256(b"mega.mst2.chunkleaf\0" || leaf_bytes)`.
@@ -262,7 +278,10 @@ fn build_subtree(leaves: &[[u8; 32]]) -> ([u8; 32], u64) {
 /// which is the order proofs are verified in. Verification must derive this
 /// itself and check the supplied proof against it — matching the root alone
 /// is not enough.
-pub fn expected_proof_shape(page_count: u64, page_index: u64) -> CodecResult<Vec<(ProofSide, u64)>> {
+pub fn expected_proof_shape(
+    page_count: u64,
+    page_index: u64,
+) -> CodecResult<Vec<(ProofSide, u64)>> {
     if page_count == 0 || page_index >= page_count {
         return Err(CodecError::BadLength("page_index out of range"));
     }
@@ -296,13 +315,17 @@ pub fn verify_leaf(
 ) -> CodecResult<()> {
     let shape = expected_proof_shape(page_count, page_index)?;
     if proof.len() != shape.len() {
-        return Err(CodecError::BadLength("proof length does not match tree shape"));
+        return Err(CodecError::BadLength(
+            "proof length does not match tree shape",
+        ));
     }
     let mut cur = leaf_hash;
     let mut cur_count = 1u64;
     for (step, (side, sib_count)) in proof.iter().zip(shape.iter()) {
         if &step.side != side || step.sibling_pages != *sib_count {
-            return Err(CodecError::BadOrdering("proof step does not match derived path"));
+            return Err(CodecError::BadOrdering(
+                "proof step does not match derived path",
+            ));
         }
         cur = match side {
             ProofSide::Right => branch_hash(&cur, &step.digest, cur_count, *sib_count),
@@ -329,11 +352,19 @@ pub fn leaf_proof(leaves: &[[u8; 32]], page_index: u64) -> CodecResult<Vec<Proof
         let k = largest_pow2_below(n) as usize;
         if idx < k {
             let (root, count) = build_subtree(&rest[k..]);
-            steps.push(ProofStep { side: ProofSide::Right, sibling_pages: count, digest: root });
+            steps.push(ProofStep {
+                side: ProofSide::Right,
+                sibling_pages: count,
+                digest: root,
+            });
             rest = &rest[..k];
         } else {
             let (root, count) = build_subtree(&rest[..k]);
-            steps.push(ProofStep { side: ProofSide::Left, sibling_pages: count, digest: root });
+            steps.push(ProofStep {
+                side: ProofSide::Left,
+                sibling_pages: count,
+                digest: root,
+            });
             rest = &rest[k..];
             idx -= k;
         }
@@ -353,7 +384,11 @@ pub fn range_chunks(offset: u64, length: u64, file_size: u64) -> CodecResult<(u6
         return Err(CodecError::BadLength("offset at or past EOF"));
     }
     // overflow-safe end
-    let end = if length >= file_size - offset { file_size } else { offset + length };
+    let end = if length >= file_size - offset {
+        file_size
+    } else {
+        offset + length
+    };
     let chunk = CHUNK_SIZE as u64;
     let start_chunk = offset / chunk;
     let end_chunk = (end - 1) / chunk;
@@ -405,15 +440,26 @@ mod tests {
 
     #[test]
     fn leaf_roundtrip_and_last_page_rule() {
-        let leaf = ChunkLeaf { page_index: 0, chunk_sha256: vec![[9; 32]; 256] };
+        let leaf = ChunkLeaf {
+            page_index: 0,
+            chunk_sha256: vec![[9; 32]; 256],
+        };
         let bytes = leaf.encode().unwrap();
         assert_eq!(bytes.len(), 16 + 32 * 256);
         assert_eq!(ChunkLeaf::decode(&bytes).unwrap(), leaf);
         // 0 or 257 digests rejected
-        assert!(ChunkLeaf { page_index: 0, chunk_sha256: vec![] }.encode().is_err());
-        assert!(ChunkLeaf { page_index: 0, chunk_sha256: vec![[9; 32]; 257] }
-            .encode()
-            .is_err());
+        assert!(ChunkLeaf {
+            page_index: 0,
+            chunk_sha256: vec![]
+        }
+        .encode()
+        .is_err());
+        assert!(ChunkLeaf {
+            page_index: 0,
+            chunk_sha256: vec![[9; 32]; 257]
+        }
+        .encode()
+        .is_err());
         // All but the last page must have exactly 256 (checked via helper).
         assert_eq!(ChunkLeaf::expected_count(600, 0), 256);
         assert_eq!(ChunkLeaf::expected_count(600, 1), 256);
@@ -449,7 +495,10 @@ mod tests {
         let leaves = vec![fake_digest(1, 0), fake_digest(1, 1), fake_digest(1, 2)];
         let (lroot, lc) = build_subtree(&leaves[..2]);
         let (rroot, rc) = build_subtree(&leaves[2..]);
-        assert_eq!(merkle_root(&leaves).unwrap(), branch_hash(&lroot, &rroot, lc, rc));
+        assert_eq!(
+            merkle_root(&leaves).unwrap(),
+            branch_hash(&lroot, &rroot, lc, rc)
+        );
     }
 
     #[test]
@@ -481,7 +530,11 @@ mod tests {
         let shape = expected_proof_shape(5, 0).unwrap();
         assert_eq!(
             shape,
-            vec![(ProofSide::Right, 1), (ProofSide::Right, 2), (ProofSide::Right, 1)]
+            vec![
+                (ProofSide::Right, 1),
+                (ProofSide::Right, 2),
+                (ProofSide::Right, 1)
+            ]
         );
         assert!(expected_proof_shape(0, 0).is_err());
         assert!(expected_proof_shape(5, 5).is_err());
@@ -490,8 +543,8 @@ mod tests {
     #[test]
     fn range_arithmetic() {
         let size = 100 * 1024 * 1024u64; // 100 MiB
-        // Spec 07 §6 example: 64 KiB at offset 100 MiB would be past EOF for
-        // this file; use in-bounds cases here.
+                                         // Spec 07 §6 example: 64 KiB at offset 100 MiB would be past EOF for
+                                         // this file; use in-bounds cases here.
         let (s, e) = range_chunks(0, 64 * 1024, size).unwrap();
         assert_eq!((s, e), (0, 0));
         let (s, e) = range_chunks(100 * 1024 * 1024 - 1, 1, size).unwrap();

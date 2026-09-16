@@ -77,9 +77,7 @@ pub(crate) fn read_u32(buf: &[u8], off: usize) -> CodecResult<u32> {
 
 pub(crate) fn read_u64(buf: &[u8], off: usize) -> CodecResult<u64> {
     buf.get(off..off + 8)
-        .map(|b| {
-            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-        })
+        .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
         .ok_or(CodecError::Truncated("u64"))
 }
 
