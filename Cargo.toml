@@ -5,8 +5,15 @@ edition = "2021"
 description = "MST/2 wire codec: ServingDescriptor (MSD2), MTP2/1 metadata pages, TreeFrame v2, Chunk Map (MCM2/MCL2). Pure byte-level parsing and encoding per Mega_ScorpioFS_MST2 specs 03/05/06/07."
 license = "Apache-2.0"
 
+[features]
+default = []
+# zstd frame encoding/decoding with strict single-frame validation (spec 06).
+zstd = ["dep:zstd", "dep:zstd-safe"]
+
 [dependencies]
 sha2 = "0.10"
+zstd = { version = "0.14", optional = true }
+zstd-safe = { version = "8", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
