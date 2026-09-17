@@ -1,2 +1,5 @@
 target/
-Cargo.lock
+
+# Cargo.lock is committed on purpose: the release workflow runs
+# `cargo test --locked`, which cannot run without a lock file, and a binary-less
+# library that ships to crates.io still wants reproducible CI resolution.
