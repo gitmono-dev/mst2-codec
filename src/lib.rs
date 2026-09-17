@@ -8,6 +8,8 @@ pub mod chunkmap;
 pub mod descriptor;
 pub mod metapage;
 pub mod treeframe;
+#[cfg(feature = "zstd")]
+pub mod zstd1;
 
 /// Codec error. Every rejection from the spec maps to one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]

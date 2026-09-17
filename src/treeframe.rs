@@ -1,11 +1,15 @@
 //! MST/2 TreeFrame wire format — spec 06.
 //!
 //! Fixed 64-byte header; kinds META(1), OBJECT(2), CHUNK(3), END(254),
-//! ERROR(255). Identity (uncompressed) encoding is mandatory and is the only
-//! one this codec handles; the optional ZSTD flag is rejected here (the
-//! transport layer may add it behind an explicit feature).
+//! ERROR(255). Identity encoding is mandatory. The optional `zstd`
+//! feature adds strict single-frame compression (window ≤ 8 MiB, exact
+//! `raw_len`, no concatenated/skippable/trailing data — spec 06) and
+//! `encode_zstd` on the three compressible payloads. END/ERROR are never
+//! compressed.
 
-use crate::{read_u16, read_u32, read_u64, sha256, CodecError, CodecResult};
+use crate::{
+    read_u16, read_u32, read_u64, sha256, write_u16, write_u32, write_u64, CodecError, CodecResult,
+};
 
 pub const VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 64;
@@ -122,22 +126,39 @@ pub fn parse_frame(buf: &[u8]) -> CodecResult<(Frame, usize)> {
             "identity encoding requires wire_len == raw_len",
         ));
     }
-    if flags & FLAG_ZSTD != 0 {
-        // zstd negotiation is transport-level; this codec handles identity only.
-        return Err(CodecError::Unsupported(
-            "zstd flag set; identity codec only",
-        ));
-    }
 
     let total = HEADER_LEN + wire_len as usize;
     if buf.len() < total {
         return Err(CodecError::Truncated("frame payload"));
     }
-    let payload = &buf[HEADER_LEN..total];
-    let digest = sha256(&[payload]);
-    if digest != payload_sha256 {
+    let wire_payload = &buf[HEADER_LEN..total];
+
+    // Header digest always covers the on-wire (compressed) payload.
+    let wire_digest = sha256(&[wire_payload]);
+    if wire_digest != payload_sha256 {
         return Err(CodecError::DigestMismatch("frame payload"));
     }
+
+    // Recover the canonical raw payload, enforcing the single-frame
+    // zstd contract when compressed (window ≤ 8 MiB, exact raw_len, no
+    // concatenated/skippable/trailing data).
+    let owned_payload: Vec<u8>;
+    let payload: &[u8] = if flags & FLAG_ZSTD == 0 {
+        wire_payload
+    } else {
+        #[cfg(feature = "zstd")]
+        {
+            owned_payload =
+                crate::zstd1::decompress_strict(wire_payload, raw_len as usize)?;
+            &owned_payload
+        }
+        #[cfg(not(feature = "zstd"))]
+        {
+            return Err(CodecError::Unsupported(
+                "zstd frame received by identity-only codec build",
+            ));
+        }
+    };
 
     let frame = match kind {
         KIND_META => Frame::Meta(decode_meta(payload)?),
@@ -555,9 +576,33 @@ fn frame_bytes(kind: u8, payload: &[u8], stream_id: u32, sequence: u64) -> Vec<u
     out
 }
 
+/// Compress `raw_payload` into one zstd frame (flags `FLAG_ZSTD`).
+/// The header digest covers the compressed wire payload, per spec 06.
+/// Not for END/ERROR frames — callers reject those.
+#[cfg(feature = "zstd")]
+fn frame_bytes_zstd(
+    kind: u8,
+    raw_payload: &[u8],
+    stream_id: u32,
+    sequence: u64,
+) -> CodecResult<Vec<u8>> {
+    let wire = crate::zstd1::compress(raw_payload, 3)?;
+    let digest = sha256(&[&wire]);
+    let mut out = header(
+        kind,
+        FLAG_ZSTD,
+        wire.len() as u32,
+        raw_payload.len() as u32,
+        stream_id,
+        sequence,
+        digest,
+    );
+    out.extend_from_slice(&wire);
+    Ok(out)
+}
+
 impl MetaPayload {
-    pub fn encode(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
-        if self.pages.is_empty() || self.pages.len() > META_MAX_PAGES {
+    pub fn encode(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {        if self.pages.is_empty() || self.pages.len() > META_MAX_PAGES {
             return Err(CodecError::BadLength("META count must be 1..64"));
         }
         let mut payload = Vec::new();
@@ -575,6 +620,24 @@ impl MetaPayload {
             return Err(CodecError::BadLength("META raw payload over 1MiB"));
         }
         Ok(frame_bytes(KIND_META, &payload, stream_id, sequence))
+    }
+
+    #[cfg(feature = "zstd")]
+    pub fn encode_zstd(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        let payload = self.raw_payload()?;
+        frame_bytes_zstd(KIND_META, &payload, stream_id, sequence)
+    }
+
+    fn raw_payload(&self) -> CodecResult<Vec<u8>> {
+        let mut payload = Vec::new();
+        write_u16(&mut payload, self.pages.len() as u16);
+        write_u16(&mut payload, 0);
+        for (pid, page) in &self.pages {
+            payload.extend_from_slice(pid);
+            write_u32(&mut payload, page.len() as u32);
+            payload.extend_from_slice(page);
+        }
+        Ok(payload)
     }
 }
 
@@ -609,6 +672,31 @@ impl ObjectPayload {
         }
         Ok(frame_bytes(KIND_OBJECT, &payload, stream_id, sequence))
     }
+
+    #[cfg(feature = "zstd")]
+    pub fn encode_zstd(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        let payload = self.raw_payload()?;
+        frame_bytes_zstd(KIND_OBJECT, &payload, stream_id, sequence)
+    }
+
+    fn raw_payload(&self) -> CodecResult<Vec<u8>> {
+        let mut payload = Vec::new();
+        write_u16(&mut payload, self.objects.len() as u16);
+        write_u16(&mut payload, 0);
+        let mut off = 0u32;
+        for (cid, data) in &self.objects {
+            payload.extend_from_slice(cid);
+            write_u32(&mut payload, data.len() as u32);
+            write_u32(&mut payload, off);
+            off = off
+                .checked_add(data.len() as u32)
+                .ok_or(CodecError::Overflow("offset"))?;
+        }
+        for (_, data) in &self.objects {
+            payload.extend_from_slice(data);
+        }
+        Ok(payload)
+    }
 }
 
 impl ChunkPayload {
@@ -623,6 +711,22 @@ impl ChunkPayload {
         crate::write_u32(&mut payload, self.chunk_bytes.len() as u32);
         payload.extend_from_slice(&self.chunk_bytes);
         Ok(frame_bytes(KIND_CHUNK, &payload, stream_id, sequence))
+    }
+
+    #[cfg(feature = "zstd")]
+    pub fn encode_zstd(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        let payload = self.raw_payload();
+        frame_bytes_zstd(KIND_CHUNK, &payload, stream_id, sequence)
+    }
+
+    fn raw_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(76 + self.chunk_bytes.len());
+        payload.extend_from_slice(&self.map_id);
+        payload.extend_from_slice(&self.file_content_id);
+        write_u64(&mut payload, self.chunk_index);
+        write_u32(&mut payload, self.chunk_bytes.len() as u32);
+        payload.extend_from_slice(&self.chunk_bytes);
+        payload
     }
 }
 
@@ -854,5 +958,160 @@ mod tests {
             parse_frame(&bytes),
             Err(CodecError::DigestMismatch(_))
         ));
+    }
+}
+
+#[cfg(all(test, feature = "zstd"))]
+mod zstd_tests {
+    use super::*;
+
+    fn obj(n: u8, rep: usize) -> ObjectPayload {
+        // Highly compressible payload so zstd clearly shrinks the wire;
+        // content_id is the real SHA-256 (encode verifies it).
+        let data = vec![n; rep];
+        let cid = sha256(&[&data]);
+        ObjectPayload {
+            objects: vec![(cid, data)],
+        }
+    }
+
+    #[test]
+    fn zstd_roundtrip_through_parse_stream() {
+        let raw = obj(0xAB, 100_000);
+        let encoded = raw.encode_zstd(7, 0).unwrap();
+        assert!(encoded.len() < 100_000, "compressed frame must be smaller");
+        // flags byte at offset 7 carries ZSTD; identity parse path must not.
+        assert_eq!(encoded[7] & FLAG_ZSTD, FLAG_ZSTD);
+        let end = EndPayload {
+            request_item_count: 1,
+            unique_unit_count: 1,
+            logical_bytes: 100_000,
+            request_body_sha256: [9u8; 32],
+        }
+        .encode(7, 1);
+        let mut stream = encoded;
+        stream.extend_from_slice(&end);
+        let frames = parse_stream(&stream).unwrap();
+        assert_eq!(frames.len(), 2);
+        match &frames[0] {
+            Frame::Object(o) => assert_eq!(*o, raw),
+            _ => panic!("wrong frame kind"),
+        }
+        assert!(matches!(frames[1], Frame::End(_)));
+    }
+
+    #[test]
+    fn identity_frames_still_decode() {
+        let raw = obj(0x01, 1000);
+        let encoded = raw.encode(1, 0).unwrap();
+        let (f, used) = parse_frame(&encoded).unwrap();
+        assert_eq!(used, encoded.len());
+        assert_eq!(f, Frame::Object(raw));
+    }
+
+    #[test]
+    fn end_and_error_frames_are_never_compressed() {
+        // No encode_zstd exists for End/Error; even hand-built zstd headers
+        // for those kinds are rejected by parse_frame.
+        let end = EndPayload {
+            request_item_count: 0,
+            unique_unit_count: 0,
+            logical_bytes: 0,
+            request_body_sha256: [0u8; 32],
+        }
+        .encode(1, 1);
+        let mut tampered = end;
+        tampered[7] = FLAG_ZSTD;
+        assert!(matches!(
+            parse_frame(&tampered),
+            Err(CodecError::BadConstant(_))
+        ));
+    }
+
+    #[test]
+    fn concatenated_zstd_frames_are_rejected() {
+        let p = obj(0x22, 50_000).encode_zstd(1, 0).unwrap();
+        let wire1 = &p[HEADER_LEN..];
+        // Two independent zstd frames concatenated in one payload region.
+        let mut doubled = Vec::new();
+        doubled.extend_from_slice(wire1);
+        doubled.extend_from_slice(wire1);
+        let mut out = header(
+            KIND_OBJECT,
+            FLAG_ZSTD,
+            doubled.len() as u32,
+            50_000,
+            1,
+            0,
+            sha256(&[&doubled]),
+        );
+        out.extend_from_slice(&doubled);
+        assert!(parse_frame(&out).is_err(), "two frames must not decode");
+    }
+
+    #[test]
+    fn trailing_bytes_after_frame_are_rejected() {
+        let p = obj(0x33, 50_000).encode_zstd(1, 0).unwrap();
+        let wire = &p[HEADER_LEN..];
+        let mut padded = wire.to_vec();
+        padded.push(0x00);
+        let mut out = header(
+            KIND_OBJECT,
+            FLAG_ZSTD,
+            padded.len() as u32,
+            50_000,
+            1,
+            0,
+            sha256(&[&padded]),
+        );
+        out.extend_from_slice(&padded);
+        assert!(parse_frame(&out).is_err(), "trailing byte must fail");
+    }
+
+    #[test]
+    fn wrong_raw_len_is_rejected_short_and_long() {
+        let p = obj(0x44, 50_000).encode_zstd(1, 0).unwrap();
+        let wire = &p[HEADER_LEN..];
+        for advertised in [10u32, 50_001] {
+            let mut out = header(
+                KIND_OBJECT,
+                FLAG_ZSTD,
+                wire.len() as u32,
+                advertised,
+                1,
+                0,
+                sha256(&[wire]),
+            );
+            out.extend_from_slice(wire);
+            assert!(parse_frame(&out).is_err(), "raw_len={advertised} must fail");
+        }
+    }
+
+    #[test]
+    fn skippable_frame_magic_is_rejected() {
+        // 0x184D2A5X skippable frame: 0x50 0x2A 0x4D 0x18 little-endian.
+        let mut wire = vec![0x50, 0x2A, 0x4D, 0x18, 0u8, 0, 0, 0];
+        wire.extend_from_slice(&[0xAA; 16]);
+        let mut out = header(
+            KIND_OBJECT,
+            FLAG_ZSTD,
+            wire.len() as u32,
+            wire.len() as u32,
+            1,
+            0,
+            sha256(&[&wire]),
+        );
+        out.extend_from_slice(&wire);
+        assert!(parse_frame(&out).is_err());
+    }
+
+    #[test]
+    fn oversized_window_is_rejected_in_zstd1_tests() {
+        // The >8 MiB window rejection uses a forged frame header and lives
+        // next to decompress_strict in zstd1.rs; here we just ensure a
+        // compressed frame round-trips at all.
+        let p = obj(0x55, 200_000).encode_zstd(1, 0).unwrap();
+        assert!(p[7] & FLAG_ZSTD != 0);
+        assert!(parse_frame(&p).is_ok());
     }
 }
