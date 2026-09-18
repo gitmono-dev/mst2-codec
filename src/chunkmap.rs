@@ -236,11 +236,16 @@ impl ChunkLeaf {
 }
 
 /// Node hash for the pages_root Merkle tree (spec 07 §5).
+/// Spec-critical field order: `domain ‖ le64(lc) ‖ left ‖ le64(rc) ‖ right`.
+/// The counts are interleaved with the child digests, not grouped.
 fn branch_hash(left: &[u8; 32], right: &[u8; 32], left_count: u64, right_count: u64) -> [u8; 32] {
-    let mut counts = Vec::with_capacity(16);
-    counts.extend_from_slice(&left_count.to_le_bytes());
-    counts.extend_from_slice(&right_count.to_le_bytes());
-    sha256(&[BRANCH_DOMAIN, &counts, left, right])
+    let mut buf = Vec::with_capacity(BRANCH_DOMAIN.len() + 16 + 64);
+    buf.extend_from_slice(BRANCH_DOMAIN);
+    buf.extend_from_slice(&left_count.to_le_bytes());
+    buf.extend_from_slice(left);
+    buf.extend_from_slice(&right_count.to_le_bytes());
+    buf.extend_from_slice(right);
+    sha256(&[&buf])
 }
 
 /// Largest power of two strictly less than `n` (n > 1).

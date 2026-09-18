@@ -148,8 +148,7 @@ pub fn parse_frame(buf: &[u8]) -> CodecResult<(Frame, usize)> {
     } else {
         #[cfg(feature = "zstd")]
         {
-            owned_payload =
-                crate::zstd1::decompress_strict(wire_payload, raw_len as usize)?;
+            owned_payload = crate::zstd1::decompress_strict(wire_payload, raw_len as usize)?;
             &owned_payload
         }
         #[cfg(not(feature = "zstd"))]
@@ -602,7 +601,8 @@ fn frame_bytes_zstd(
 }
 
 impl MetaPayload {
-    pub fn encode(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {        if self.pages.is_empty() || self.pages.len() > META_MAX_PAGES {
+    pub fn encode(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        if self.pages.is_empty() || self.pages.len() > META_MAX_PAGES {
             return Err(CodecError::BadLength("META count must be 1..64"));
         }
         let mut payload = Vec::new();
@@ -624,6 +624,8 @@ impl MetaPayload {
 
     #[cfg(feature = "zstd")]
     pub fn encode_zstd(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        // Run the identity encode for full validation (count, page_id, size).
+        self.encode(stream_id, sequence)?;
         let payload = self.raw_payload()?;
         frame_bytes_zstd(KIND_META, &payload, stream_id, sequence)
     }
@@ -675,6 +677,8 @@ impl ObjectPayload {
 
     #[cfg(feature = "zstd")]
     pub fn encode_zstd(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        // Run the identity encode for full validation (count, digest, size).
+        self.encode(stream_id, sequence)?;
         let payload = self.raw_payload()?;
         frame_bytes_zstd(KIND_OBJECT, &payload, stream_id, sequence)
     }

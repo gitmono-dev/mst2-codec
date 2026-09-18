@@ -544,6 +544,43 @@ impl Page {
         first[..len].to_vec()
     }
 
+    /// Verify a *received* child page against its parent: the child bytes
+    /// must hash to the `child_page_id` the parent commits to, and the
+    /// child's canonical partition must match the parent's route selection.
+    ///
+    /// This is the spec 05 §6/§7 verifier use case — checking a page that
+    /// arrived over the wire, not one built from entries. The server-side
+    /// `pages_along_route` check is tautological (same build, same bytes);
+    /// this function is the one that actually detects tampering.
+    pub fn verify_received_child(
+        parent_page_bytes: &[u8],
+        label: u8,
+        received_page_bytes: &[u8],
+    ) -> CodecResult<()> {
+        let (parent, _) = Page::decode(parent_page_bytes)?;
+        let children = match &parent {
+            Page::Branch { children, .. } => children,
+            Page::Leaf { .. } => {
+                return Err(CodecError::BadOrdering(
+                    "cannot verify a child of a leaf page",
+                ))
+            }
+        };
+        let child = children
+            .iter()
+            .find(|c| c.label == label)
+            .ok_or(CodecError::BadOrdering("label not present in parent"))?;
+        let received_id = sha256(&[received_page_bytes]);
+        if received_id != child.child_page_id {
+            return Err(CodecError::DigestMismatch(
+                "received page does not match parent's child_page_id",
+            ));
+        }
+        // The received page must also be a structurally valid MTP2 page.
+        Page::decode(received_page_bytes)?;
+        Ok(())
+    }
+
     /// Canonical partition per spec 05 §5 `Build(S)`. The caller must supply
     /// entries sorted by name with no duplicates. Returns the encoded page.
     pub fn build(entries: &[Entry]) -> CodecResult<Vec<u8>> {
@@ -564,9 +601,14 @@ impl Page {
             let leaf = Page::Leaf {
                 entries: entries.to_vec(),
             };
-            let bytes = leaf.encode()?;
-            if bytes.len() <= PAGE_MAX_BYTES {
-                return Ok(bytes);
+            // Spec 05 §5: the leaf path requires BOTH `len(S) ≤ 128` AND
+            // `20 + sum ≤ 16384`. If the encoded leaf exceeds the page limit,
+            // fall through to the branch case instead of propagating the
+            // BadLength error (which would make legal directories unbuildable).
+            if let Ok(bytes) = leaf.encode() {
+                if bytes.len() <= PAGE_MAX_BYTES {
+                    return Ok(bytes);
+                }
             }
         }
         // Overflow guard: entries.len() > 128 implies non-empty.

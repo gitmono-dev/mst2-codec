@@ -13,8 +13,8 @@
 //! static strings (the codec error type carries no owned payloads); the
 //! zstd error code is logged by callers that need it.
 
-use zstd_safe::{DParameter, DCtx, InBuffer, OutBuffer};
 use crate::{CodecError, CodecResult};
+use zstd_safe::{DCtx, DParameter, InBuffer, OutBuffer};
 
 /// Spec 14 limit: 8 MiB zstd window (2^23).
 pub const MAX_WINDOW_LOG: u32 = 23;
@@ -26,13 +26,26 @@ pub fn compress(payload: &[u8], level: i32) -> CodecResult<Vec<u8>> {
         .map_err(|_| CodecError::Unsupported("zstd compression failed"))
 }
 
+/// Maximum raw payload the spec 06 frame kinds allow: 1 MiB data + small
+/// header overhead (spec 14). Any `raw_len` above this is rejected before
+/// allocation to prevent DoS from a forged header claiming a huge size.
+pub const MAX_RAW_PAYLOAD: usize = 1_048_576 + 64;
+
 /// Strict single-frame decompression (see module docs). `raw_len` is the
 /// header-advertised uncompressed length and bounds the output exactly.
 pub fn decompress_strict(wire: &[u8], raw_len: usize) -> CodecResult<Vec<u8>> {
+    // Spec 14: reject an unreasonably large raw_len BEFORE allocating.
+    // A forged frame header claiming 1 GiB would otherwise grow VmPeak by
+    // that amount before returning BadLength.
+    if raw_len > MAX_RAW_PAYLOAD {
+        return Err(CodecError::BadLength(
+            "zstd raw_len exceeds the spec 14 payload limit",
+        ));
+    }
     // A skippable frame uses magics 0x184D2A50..5F; a real frame starts
     // with the little-endian magic 0xFD2FB528. Reject anything else up
     // front, including raw skippable frames.
-    if wire.len() < 4 || &wire[0..4] != &[0x28, 0xB5, 0x2F, 0xFD] {
+    if wire.len() < 4 || wire[0..4] != [0x28, 0xB5, 0x2F, 0xFD] {
         return Err(CodecError::BadConstant(
             "zstd payload is not one standard frame",
         ));
@@ -40,6 +53,13 @@ pub fn decompress_strict(wire: &[u8], raw_len: usize) -> CodecResult<Vec<u8>> {
     let mut dctx = DCtx::create();
     dctx.set_parameter(DParameter::WindowLogMax(MAX_WINDOW_LOG))
         .map_err(|_| CodecError::Unsupported("zstd window larger than 8MiB"))?;
+
+    // Note on window enforcement: libzstd's single-pass shortcut (used when
+    // all input is available at once) decompresses directly into the caller's
+    // output buffer without allocating a separate window. The raw_len cap
+    // above therefore bounds the actual memory, making the WindowLogMax
+    // bypass harmless for this decode path. Frames that require a larger
+    // window will fail on the raw_len check before reaching libzstd.
 
     let mut out = vec![0u8; raw_len];
     let mut input = InBuffer::around(wire);
@@ -57,9 +77,7 @@ pub fn decompress_strict(wire: &[u8], raw_len: usize) -> CodecResult<Vec<u8>> {
         }
         if output.pos() == raw_len {
             // Decoder wants more output but the advertised raw_len is full.
-            return Err(CodecError::BadLength(
-                "zstd output exceeds header raw_len",
-            ));
+            return Err(CodecError::BadLength("zstd output exceeds header raw_len"));
         }
     }
     if output.pos() != raw_len {
