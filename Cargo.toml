@@ -1,6 +1,6 @@
 [package]
 name = "mst2-codec"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "MST/2 wire codec: ServingDescriptor (MSD2), MTP2/1 metadata pages, TreeFrame v2, Chunk Map (MCM2/MCL2). Pure byte-level parsing and encoding per Mega_ScorpioFS_MST2 specs 03/05/06/07."
 license = "Apache-2.0"

@@ -26,10 +26,13 @@ pub fn compress(payload: &[u8], level: i32) -> CodecResult<Vec<u8>> {
         .map_err(|_| CodecError::Unsupported("zstd compression failed"))
 }
 
-/// Maximum raw payload the spec 06 frame kinds allow: 1 MiB data + small
-/// header overhead (spec 14). Any `raw_len` above this is rejected before
-/// allocation to prevent DoS from a forged header claiming a huge size.
-pub const MAX_RAW_PAYLOAD: usize = 1_048_576 + 64;
+/// Maximum raw payload the spec 06 frame kinds allow: 1 MiB data + the
+/// frame's own structural fields (a full CHUNK frame carries the 1 MiB chunk
+/// plus map_id/file_content_id/chunk_index — 72 bytes — and a little slack
+/// for future header fields; spec 14). Any `raw_len` above this is rejected
+/// before allocation to prevent DoS from a forged header claiming a huge
+/// size.
+pub const MAX_RAW_PAYLOAD: usize = 1_048_576 + 256;
 
 /// Strict single-frame decompression (see module docs). `raw_len` is the
 /// header-advertised uncompressed length and bounds the output exactly.
@@ -149,5 +152,20 @@ mod tests {
         // skippable frame 0x184D2A50
         let skip = vec![0x50, 0x2A, 0x4D, 0x18, 0, 0, 0, 0];
         assert!(decompress_strict(&skip, 0).is_err());
+    }
+
+    #[test]
+    fn full_mib_chunk_payload_fits_under_the_cap() {
+        // A full 1 MiB CHUNK frame's raw payload is the chunk plus its 72
+        // bytes of frame fields (map_id + file_content_id + chunk_index):
+        // the cap must accept it or every max-size chunk read over zstd
+        // fails (regression for the 0.3.0 +64 estimate).
+        let payload_len = 1_048_576 + 72;
+        let payload = vec![0xA5u8; payload_len];
+        let wire = compress(&payload, 1).unwrap();
+        assert_eq!(decompress_strict(&wire, payload_len).unwrap(), payload);
+        // Just above the cap is still refused.
+        let mut over = vec![0xA5u8; MAX_RAW_PAYLOAD + 1];
+        assert!(decompress_strict(&compress(&over, 1).unwrap(), over.len()).is_err());
     }
 }
