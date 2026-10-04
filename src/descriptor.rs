@@ -57,6 +57,7 @@ impl ServingDescriptor {
 
     /// Encode to canonical bytes.
     pub fn encode(&self) -> CodecResult<Vec<u8>> {
+        validate_instance_uuid(&self.instance_uuid)?;
         validate_scope(&self.scope)?;
         let mut out = Vec::with_capacity(BASE_LENGTH + self.scope.len());
         out.extend_from_slice(b"MSD2");
@@ -116,6 +117,7 @@ impl ServingDescriptor {
         }
         let mut instance_uuid = [0u8; 16];
         instance_uuid.copy_from_slice(&buf[8..24]);
+        validate_instance_uuid(&instance_uuid)?;
         let mut namespace_view_id = [0u8; 32];
         namespace_view_id.copy_from_slice(&buf[24..56]);
         let scope_bytes = &buf[58..58 + scope_len];
@@ -136,8 +138,8 @@ impl ServingDescriptor {
 
 /// Canonical Mega absolute UTF-8 path: starts with `/`, no trailing slash
 /// (except the root itself), no empty/`.`/`..` components, no NUL,
-/// each component at most 256 bytes (spec 02 §3; note this component cap is
-/// wider than the 255-byte MTP2 name cap of spec 05 §2).
+/// at most 4096 UTF-8 bytes and 256 components, each at most 255 bytes
+/// (spec 02 §3 and spec 14 §4).
 pub fn validate_scope(scope: &str) -> CodecResult<()> {
     if scope.is_empty() || !scope.starts_with('/') {
         return Err(CodecError::BadName("scope must be absolute"));
@@ -145,22 +147,35 @@ pub fn validate_scope(scope: &str) -> CodecResult<()> {
     if scope.contains('\0') {
         return Err(CodecError::BadName("NUL in scope"));
     }
+    if scope.len() > 4096 {
+        return Err(CodecError::BadLength("scope over 4096 UTF-8 bytes"));
+    }
     if scope.len() > 1 && scope.ends_with('/') {
         return Err(CodecError::BadName("trailing slash"));
     }
     if scope == "/" {
         return Ok(());
     }
-    for comp in scope[1..].split('/') {
+    for (index, comp) in scope[1..].split('/').enumerate() {
+        if index >= 256 {
+            return Err(CodecError::BadLength("scope over 256 components"));
+        }
         if comp.is_empty() {
             return Err(CodecError::BadName("empty path component"));
         }
         if comp == "." || comp == ".." {
             return Err(CodecError::BadName("dot component"));
         }
-        if comp.len() > 256 {
-            return Err(CodecError::BadName("path component over 256 bytes"));
+        if comp.len() > 255 {
+            return Err(CodecError::BadName("path component over 255 bytes"));
         }
+    }
+    Ok(())
+}
+
+fn validate_instance_uuid(uuid: &[u8; 16]) -> CodecResult<()> {
+    if *uuid == [0; 16] {
+        return Err(CodecError::BadConstant("instance UUID must be non-nil"));
     }
     Ok(())
 }
@@ -244,9 +259,54 @@ mod tests {
     #[test]
     fn scope_component_length_limit() {
         let mut d = sample();
-        d.scope = format!("/{}", "a".repeat(256));
+        d.scope = format!("/{}", "a".repeat(255));
         assert!(d.encode().is_ok());
-        d.scope = format!("/{}", "a".repeat(257));
+        d.scope = format!("/{}", "a".repeat(256));
+        assert!(d.encode().is_err());
+    }
+
+    #[test]
+    fn scope_limits_count_utf8_bytes_and_components() {
+        let mut d = sample();
+        d.scope = format!("/{}/a", vec!["a".repeat(255); 15].join("/"));
+        d.scope.push_str(&"b".repeat(254));
+        assert_eq!(d.scope.len(), 4096);
+        assert_eq!(ServingDescriptor::decode(&d.encode().unwrap()).unwrap(), d);
+        let oversized = format!("{}/c", &d.scope[..d.scope.len() - 1]);
+        assert_eq!(oversized.len(), 4097);
+        assert!(validate_scope(&oversized).is_err());
+
+        d.scope = format!("/{}", vec!["a"; 256].join("/"));
+        assert_eq!(ServingDescriptor::decode(&d.encode().unwrap()).unwrap(), d);
+        d.scope.push_str("/a");
+        assert!(d.encode().is_err());
+
+        assert!(validate_scope(&format!("/{}", "é".repeat(127))).is_ok());
+        assert!(validate_scope(&format!("/{}", "é".repeat(128))).is_err());
+        // A missing total-length bound previously truncated the u16 field.
+        assert!(validate_scope(&format!("/{}", vec!["a"; 40_000].join("/"))).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_over_limit_scope_and_nil_instance() {
+        let bytes = sample().encode().unwrap();
+        let fields = &bytes[59..];
+        for scope in [
+            format!("/{}", "a".repeat(256)),
+            format!("/{}", vec!["a"; 257].join("/")),
+            format!("/{}", vec!["a".repeat(255); 17].join("/")),
+        ] {
+            let mut forged = bytes[..56].to_vec();
+            write_u16(&mut forged, scope.len() as u16);
+            forged.extend_from_slice(scope.as_bytes());
+            forged.extend_from_slice(fields);
+            assert!(ServingDescriptor::decode(&forged).is_err());
+        }
+        let mut nil = bytes;
+        nil[8..24].fill(0);
+        assert!(ServingDescriptor::decode(&nil).is_err());
+        let mut d = sample();
+        d.instance_uuid = [0; 16];
         assert!(d.encode().is_err());
     }
 }

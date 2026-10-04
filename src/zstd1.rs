@@ -165,7 +165,7 @@ mod tests {
         let wire = compress(&payload, 1).unwrap();
         assert_eq!(decompress_strict(&wire, payload_len).unwrap(), payload);
         // Just above the cap is still refused.
-        let mut over = vec![0xA5u8; MAX_RAW_PAYLOAD + 1];
+        let over = vec![0xA5u8; MAX_RAW_PAYLOAD + 1];
         assert!(decompress_strict(&compress(&over, 1).unwrap(), over.len()).is_err());
     }
 }

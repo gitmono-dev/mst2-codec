@@ -16,6 +16,7 @@ pub const LEAF_MAX_ENTRIES: usize = 128;
 pub const PAGE_MAX_BYTES: usize = 16384;
 pub const BRANCH_MAX_CHILDREN: usize = 256;
 pub const MAX_DEPTH: usize = 255;
+const MAX_TOTAL_ENTRIES: u64 = (1u64 << 63) - 1;
 
 const DOMAIN: &[u8] = b"mega.mst2.metapage\0";
 pub const HEADER_LEN: usize = 20;
@@ -228,7 +229,7 @@ impl Page {
         }
         let n = read_u16(page_bytes, 6)? as usize;
         let total_entries = read_u64(page_bytes, 8)?;
-        if total_entries > (1u64 << 63) - 1 {
+        if total_entries > MAX_TOTAL_ENTRIES {
             return Err(CodecError::BadLength("total_entries over 2^63-1"));
         }
         let payload_len = read_u32(page_bytes, 16)? as usize;
@@ -268,6 +269,9 @@ impl Page {
                 let mut off = 0usize;
                 let prefix_len = read_u16(payload, off)? as usize;
                 off += 2;
+                if prefix_len > MAX_DEPTH {
+                    return Err(CodecError::BadLength("branch prefix over 255 bytes"));
+                }
                 let prefix = payload
                     .get(off..off + prefix_len)
                     .ok_or(CodecError::Truncated("branch prefix"))?
@@ -338,7 +342,10 @@ impl Page {
                         "branch needs at least two groups (terminal counts as one)",
                     ));
                 }
-                let declared = children.iter().map(|c| c.subtree_entries).sum::<u64>();
+                let declared = children.iter().try_fold(0u64, |sum, child| {
+                    sum.checked_add(child.subtree_entries)
+                        .ok_or(CodecError::Overflow("branch child counts"))
+                })?;
                 let expected = declared
                     .checked_add(has_terminal as u64)
                     .ok_or(CodecError::Overflow("total_entries"))?;
@@ -388,6 +395,12 @@ impl Page {
                 terminal,
                 children,
             } => {
+                if prefix.len() > MAX_DEPTH {
+                    return Err(CodecError::BadLength("branch prefix over 255 bytes"));
+                }
+                if children.len() > BRANCH_MAX_CHILDREN {
+                    return Err(CodecError::BadLength("branch over 256 children"));
+                }
                 write_u16(&mut payload, prefix.len() as u16);
                 payload.extend_from_slice(prefix);
                 if let Some(t) = terminal {
@@ -427,6 +440,9 @@ impl Page {
                 let total = sum
                     .checked_add(terminal.is_some() as u64)
                     .ok_or(CodecError::Overflow("total_entries"))?;
+                if total > MAX_TOTAL_ENTRIES {
+                    return Err(CodecError::BadLength("total_entries over 2^63-1"));
+                }
                 (1, children.len(), total)
             }
         };
@@ -558,8 +574,10 @@ impl Page {
         received_page_bytes: &[u8],
     ) -> CodecResult<()> {
         let (parent, _) = Page::decode(parent_page_bytes)?;
-        let children = match &parent {
-            Page::Branch { children, .. } => children,
+        let (prefix, children) = match &parent {
+            Page::Branch {
+                prefix, children, ..
+            } => (prefix, children),
             Page::Leaf { .. } => {
                 return Err(CodecError::BadOrdering(
                     "cannot verify a child of a leaf page",
@@ -570,14 +588,33 @@ impl Page {
             .iter()
             .find(|c| c.label == label)
             .ok_or(CodecError::BadOrdering("label not present in parent"))?;
-        let received_id = sha256(&[received_page_bytes]);
+        let received_id = page_id(received_page_bytes);
         if received_id != child.child_page_id {
             return Err(CodecError::DigestMismatch(
                 "received page does not match parent's child_page_id",
             ));
         }
-        // The received page must also be a structurally valid MTP2 page.
-        Page::decode(received_page_bytes)?;
+        let (received, total_entries) = Page::decode(received_page_bytes)?;
+        if total_entries != child.subtree_entries {
+            return Err(CodecError::BadOrdering(
+                "received child count does not match parent",
+            ));
+        }
+        let mut expected_prefix = prefix.clone();
+        expected_prefix.push(label);
+        let partition_matches = match &received {
+            Page::Leaf { entries } => entries
+                .iter()
+                .all(|entry| entry.name.starts_with(&expected_prefix)),
+            // A compressed radix child may extend its parent's prefix by
+            // several bytes; it must preserve the selected prefix/label.
+            Page::Branch { prefix, .. } => prefix.starts_with(&expected_prefix),
+        };
+        if !partition_matches {
+            return Err(CodecError::BadOrdering(
+                "received child outside parent prefix/label partition",
+            ));
+        }
         Ok(())
     }
 
@@ -858,6 +895,194 @@ mod tests {
         let mut bytes = Page::Leaf { entries: vec![] }.encode().unwrap();
         bytes.push(0);
         assert!(Page::decode(&bytes).is_err());
+    }
+
+    fn branch_with_counts(counts: &[u64]) -> Page {
+        Page::Branch {
+            prefix: vec![],
+            terminal: None,
+            children: counts
+                .iter()
+                .enumerate()
+                .map(|(index, count)| BranchChild {
+                    label: index as u8,
+                    subtree_entries: *count,
+                    child_page_id: cid(index as u8 + 1),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn branch_count_overflow_is_an_error_without_panicking() {
+        let mut bytes = branch_with_counts(&[1, 1]).encode().unwrap();
+        // Each child is label:u8, count:u64, page_id:32. Keep the header
+        // total small so the parser must inspect the overflowing payload.
+        let first_count = HEADER_LEN + 3 + 1;
+        let second_count = first_count + 41;
+        // On an unchecked release-build sum, MAX + 1 wraps to this forged
+        // header total and would incorrectly pass the count comparison.
+        bytes[8..16].copy_from_slice(&0u64.to_le_bytes());
+        bytes[first_count..first_count + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        bytes[second_count..second_count + 8].copy_from_slice(&1u64.to_le_bytes());
+        let parsed = std::panic::catch_unwind(|| Page::decode(&bytes));
+        assert!(parsed.is_ok(), "malformed page must not panic");
+        assert!(matches!(parsed.unwrap(), Err(CodecError::Overflow(_))));
+        assert!(branch_with_counts(&[u64::MAX, 1]).encode().is_err());
+    }
+
+    #[test]
+    fn branch_total_entries_accepts_the_limit_and_rejects_larger_values() {
+        let valid = branch_with_counts(&[MAX_TOTAL_ENTRIES - 1, 1]);
+        let bytes = valid.encode().unwrap();
+        assert_eq!(Page::decode(&bytes).unwrap().1, MAX_TOTAL_ENTRIES);
+        assert!(branch_with_counts(&[MAX_TOTAL_ENTRIES, 1])
+            .encode()
+            .is_err());
+        let mut bytes = bytes;
+        bytes[8..16].copy_from_slice(&(MAX_TOTAL_ENTRIES + 1).to_le_bytes());
+        assert!(Page::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn branch_prefix_length_is_bounded_without_requiring_independent_utf8() {
+        let mut branch = branch_with_counts(&[1, 1]);
+        let Page::Branch { prefix, .. } = &mut branch else {
+            unreachable!();
+        };
+        // A radix prefix may end inside a UTF-8 codepoint (spec 05 §4).
+        *prefix = vec![0xc3; MAX_DEPTH];
+        let bytes = branch.encode().unwrap();
+        assert_eq!(Page::decode(&bytes).unwrap().0, branch);
+
+        let Page::Branch { prefix, .. } = &mut branch else {
+            unreachable!();
+        };
+        prefix.push(0xc3);
+        assert!(branch.encode().is_err());
+        let mut forged = bytes;
+        forged[HEADER_LEN..HEADER_LEN + 2].copy_from_slice(&((MAX_DEPTH + 1) as u16).to_le_bytes());
+        forged.insert(HEADER_LEN + 2 + MAX_DEPTH, 0xc3);
+        let payload_len = (forged.len() - HEADER_LEN) as u32;
+        forged[16..20].copy_from_slice(&payload_len.to_le_bytes());
+        assert!(Page::decode(&forged).is_err());
+    }
+
+    #[test]
+    fn received_child_uses_the_domain_separated_page_identity() {
+        let entries = many_files(600);
+        let root = Page::build(&entries).unwrap();
+        let Page::Branch { children, .. } = Page::decode(&root).unwrap().0 else {
+            panic!("fixture must split into branches");
+        };
+        let label = children[0].label;
+        let pages = Page::pages_along_route(&entries, &[label]).unwrap();
+        Page::verify_received_child(&root, label, &pages[1]).unwrap();
+        let mut tampered = pages[1].clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            Page::verify_received_child(&root, label, &tampered),
+            Err(CodecError::DigestMismatch(_))
+        ));
+        // A parent using plain SHA256(page) is not a canonical page binding.
+        let mut parent = Page::decode(&root).unwrap().0;
+        let Page::Branch { children, .. } = &mut parent else {
+            unreachable!();
+        };
+        children[0].child_page_id = sha256(&[&pages[1]]);
+        assert!(Page::verify_received_child(&parent.encode().unwrap(), label, &pages[1]).is_err());
+    }
+
+    fn parent_for_child(prefix: &[u8], label: u8, child: &[u8]) -> Vec<u8> {
+        Page::Branch {
+            prefix: prefix.to_vec(),
+            terminal: None,
+            children: vec![
+                BranchChild {
+                    label,
+                    subtree_entries: Page::decode(child).unwrap().1,
+                    child_page_id: page_id(child),
+                },
+                BranchChild {
+                    label: label + 1,
+                    subtree_entries: 1,
+                    child_page_id: cid(7),
+                },
+            ],
+        }
+        .encode()
+        .unwrap()
+    }
+
+    #[test]
+    fn received_child_rejects_a_mismatched_parent_count() {
+        let child = Page::Leaf {
+            entries: vec![Entry::file(EntryKind::Regular, b"ab", 1, cid(1))],
+        }
+        .encode()
+        .unwrap();
+        let parent = parent_for_child(b"a", b'b', &child);
+        Page::verify_received_child(&parent, b'b', &child).unwrap();
+        let mut parent = Page::decode(&parent).unwrap().0;
+        let Page::Branch { children, .. } = &mut parent else {
+            unreachable!();
+        };
+        children[0].subtree_entries += 1;
+        assert!(matches!(
+            Page::verify_received_child(&parent.encode().unwrap(), b'b', &child),
+            Err(CodecError::BadOrdering(_))
+        ));
+    }
+
+    #[test]
+    fn received_leaf_checks_every_name_in_the_byte_partition() {
+        let child = Page::Leaf {
+            entries: vec![
+                Entry::file(EntryKind::Regular, "é".as_bytes(), 1, cid(1)),
+                Entry::file(EntryKind::Regular, "ê".as_bytes(), 1, cid(2)),
+            ],
+        }
+        .encode()
+        .unwrap();
+        // The selected prefix ends in the middle of a UTF-8 codepoint.
+        let parent = parent_for_child(&[], 0xc3, &child);
+        Page::verify_received_child(&parent, 0xc3, &child).unwrap();
+        let wrong_child = Page::Leaf {
+            entries: vec![
+                Entry::file(EntryKind::Regular, b"wrong", 1, cid(3)),
+                Entry::file(EntryKind::Regular, "é".as_bytes(), 1, cid(1)),
+            ],
+        }
+        .encode()
+        .unwrap();
+        let parent = parent_for_child(&[], 0xc3, &wrong_child);
+        assert!(matches!(
+            Page::verify_received_child(&parent, 0xc3, &wrong_child),
+            Err(CodecError::BadOrdering(_))
+        ));
+    }
+
+    #[test]
+    fn received_branch_preserves_compressed_prefix_and_terminal_partition() {
+        let child = Page::Branch {
+            prefix: b"abcd".to_vec(),
+            terminal: Some(Entry::file(EntryKind::Regular, b"abcd", 1, cid(1))),
+            children: vec![BranchChild {
+                label: b'e',
+                subtree_entries: 200,
+                child_page_id: cid(2),
+            }],
+        }
+        .encode()
+        .unwrap();
+        // Child skips several radix bytes after the parent's selected 'b'.
+        let parent = parent_for_child(b"a", b'b', &child);
+        Page::verify_received_child(&parent, b'b', &child).unwrap();
+        let parent = parent_for_child(b"a", b'c', &child);
+        assert!(matches!(
+            Page::verify_received_child(&parent, b'c', &child),
+            Err(CodecError::BadOrdering(_))
+        ));
     }
 
     #[test]
