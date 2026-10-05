@@ -8,6 +8,8 @@
 use super::{validate_absolute_path, PATH_MAX_BYTES};
 use crate::{sha256, CodecError, CodecResult};
 
+pub mod index;
+
 pub const NODE_MAX_BYTES: usize = 16_384;
 pub const CHILD_MAX_COUNT: usize = 256;
 const NODE_DOMAIN: &[u8] = b"mega.namespace-radix.v1\0";
