@@ -7,6 +7,8 @@
 
 use crate::{sha256, CodecError, CodecResult};
 
+pub mod radix;
+
 pub const MANIFEST_MAX_BYTES: usize = 16_384;
 const PATH_MAX_BYTES: usize = 4096;
 const SOURCE_DOMAIN: &[u8] = b"mega.source-snapshot.v1\0";
