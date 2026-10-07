@@ -29,6 +29,7 @@ pub const OBJECT_MAX_LEN: u32 = 262_144;
 pub const OBJECT_MAX_RAW: usize = 1_048_576;
 pub const CHUNK_MAX_LEN: u32 = 1_048_576;
 pub const ERROR_MAX_BYTES: usize = 4096;
+pub const DATA_MAX_WIRE: usize = 2_097_152;
 
 /// A parsed frame header (payload digest included).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,21 +128,29 @@ pub fn parse_frame(buf: &[u8]) -> CodecResult<(Frame, usize)> {
         ));
     }
 
-    let total = HEADER_LEN + wire_len as usize;
+    let raw_limit = match kind {
+        KIND_META => META_MAX_RAW,
+        KIND_OBJECT => OBJECT_MAX_RAW,
+        KIND_CHUNK => 76 + CHUNK_MAX_LEN as usize,
+        KIND_END => 48,
+        KIND_ERROR => ERROR_MAX_BYTES,
+        _ => return Err(CodecError::BadConstant("frame kind")),
+    };
+    if raw_len as usize > raw_limit || wire_len as usize > DATA_MAX_WIRE {
+        return Err(CodecError::BadLength("frame payload exceeds kind limit"));
+    }
+    let total = HEADER_LEN
+        .checked_add(wire_len as usize)
+        .ok_or(CodecError::BadLength("frame length overflow"))?;
     if buf.len() < total {
         return Err(CodecError::Truncated("frame payload"));
     }
     let wire_payload = &buf[HEADER_LEN..total];
 
-    // Header digest always covers the on-wire (compressed) payload.
-    let wire_digest = sha256(&[wire_payload]);
-    if wire_digest != payload_sha256 {
-        return Err(CodecError::DigestMismatch("frame payload"));
-    }
-
     // Recover the canonical raw payload, enforcing the single-frame
     // zstd contract when compressed (window ≤ 8 MiB, exact raw_len, no
     // concatenated/skippable/trailing data).
+    #[cfg(feature = "zstd")]
     let owned_payload: Vec<u8>;
     let payload: &[u8] = if flags & FLAG_ZSTD == 0 {
         wire_payload
@@ -158,6 +167,9 @@ pub fn parse_frame(buf: &[u8]) -> CodecResult<(Frame, usize)> {
             ));
         }
     };
+    if sha256(&[payload]) != payload_sha256 {
+        return Err(CodecError::DigestMismatch("frame raw payload"));
+    }
 
     let frame = match kind {
         KIND_META => Frame::Meta(decode_meta(payload)?),
@@ -576,7 +588,7 @@ fn frame_bytes(kind: u8, payload: &[u8], stream_id: u32, sequence: u64) -> Vec<u
 }
 
 /// Compress `raw_payload` into one zstd frame (flags `FLAG_ZSTD`).
-/// The header digest covers the compressed wire payload, per spec 06.
+/// The header digest covers the raw payload, per spec 06.
 /// Not for END/ERROR frames — callers reject those.
 #[cfg(feature = "zstd")]
 fn frame_bytes_zstd(
@@ -586,7 +598,7 @@ fn frame_bytes_zstd(
     sequence: u64,
 ) -> CodecResult<Vec<u8>> {
     let wire = crate::zstd1::compress(raw_payload, 3)?;
-    let digest = sha256(&[&wire]);
+    let digest = sha256(&[raw_payload]);
     let mut out = header(
         kind,
         FLAG_ZSTD,
@@ -719,6 +731,9 @@ impl ChunkPayload {
 
     #[cfg(feature = "zstd")]
     pub fn encode_zstd(&self, stream_id: u32, sequence: u64) -> CodecResult<Vec<u8>> {
+        if self.chunk_bytes.len() as u64 > CHUNK_MAX_LEN as u64 {
+            return Err(CodecError::BadLength("chunk over 1MiB"));
+        }
         let payload = self.raw_payload();
         frame_bytes_zstd(KIND_CHUNK, &payload, stream_id, sequence)
     }
@@ -935,6 +950,36 @@ mod tests {
     }
 
     #[test]
+    fn oversized_lengths_and_unknown_kinds_fail_before_reading_payload() {
+        for (kind, raw_limit) in [
+            (KIND_META, META_MAX_RAW),
+            (KIND_OBJECT, OBJECT_MAX_RAW),
+            (KIND_CHUNK, 76 + CHUNK_MAX_LEN as usize),
+            (KIND_END, 48),
+            (KIND_ERROR, ERROR_MAX_BYTES),
+        ] {
+            let raw_len = (raw_limit + 1) as u32;
+            let bytes = header(kind, 0, raw_len, raw_len, 1, 0, [0; 32]);
+            assert!(matches!(parse_frame(&bytes), Err(CodecError::BadLength(_))));
+        }
+        let bytes = header(
+            KIND_OBJECT,
+            FLAG_ZSTD,
+            DATA_MAX_WIRE as u32 + 1,
+            100,
+            1,
+            0,
+            [0; 32],
+        );
+        assert!(matches!(parse_frame(&bytes), Err(CodecError::BadLength(_))));
+        let bytes = header(99, FLAG_ZSTD, 1, 1, 1, 0, [0; 32]);
+        assert!(matches!(
+            parse_frame(&bytes),
+            Err(CodecError::BadConstant("frame kind"))
+        ));
+    }
+
+    #[test]
     fn header_rules() {
         let p = EndPayload {
             request_item_count: 0,
@@ -1014,6 +1059,86 @@ mod zstd_tests {
     }
 
     #[test]
+    fn compression_representations_share_the_raw_payload_digest() {
+        use crate::metapage::{page_id, Page};
+        let page = Page::Leaf { entries: vec![] }.encode().unwrap();
+        let meta = MetaPayload {
+            pages: vec![(page_id(&page), page)],
+        };
+        let object = obj(0x21, 100_000);
+        let chunk = ChunkPayload {
+            map_id: [1; 32],
+            file_content_id: [2; 32],
+            chunk_index: 3,
+            chunk_bytes: vec![0x42; CHUNK_MAX_LEN as usize],
+        };
+        for (identity, compressed) in [
+            (meta.encode(7, 0).unwrap(), meta.encode_zstd(7, 0).unwrap()),
+            (
+                object.encode(7, 0).unwrap(),
+                object.encode_zstd(7, 0).unwrap(),
+            ),
+            (
+                chunk.encode(7, 0).unwrap(),
+                chunk.encode_zstd(7, 0).unwrap(),
+            ),
+        ] {
+            let raw = &identity[HEADER_LEN..];
+            assert_eq!(&compressed[32..64], &sha256(&[raw]));
+            assert_eq!(&identity[32..64], &compressed[32..64]);
+            let expected = parse_frame(&identity).unwrap().0;
+            assert_eq!(parse_frame(&compressed).unwrap().0, expected);
+            for level in [1, 19] {
+                let wire = zstd::bulk::compress(raw, level).unwrap();
+                let mut independent = header(
+                    identity[6],
+                    FLAG_ZSTD,
+                    wire.len() as u32,
+                    raw.len() as u32,
+                    7,
+                    0,
+                    sha256(&[raw]),
+                );
+                independent.extend_from_slice(&wire);
+                assert_eq!(parse_frame(&independent).unwrap().0, expected);
+            }
+            let mut legacy = compressed;
+            let wire_digest = sha256(&[&legacy[HEADER_LEN..]]);
+            assert_ne!(&legacy[32..64], &wire_digest);
+            legacy[32..64].copy_from_slice(&wire_digest);
+            assert!(matches!(
+                parse_frame(&legacy),
+                Err(CodecError::DigestMismatch(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn raw_digest_is_checked_even_when_object_content_is_valid() {
+        let mut encoded = obj(0x45, 20_000).encode_zstd(1, 0).unwrap();
+        encoded[32] ^= 1;
+        assert!(matches!(
+            parse_frame(&encoded),
+            Err(CodecError::DigestMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn both_encodings_refuse_oversized_chunks_before_encoding() {
+        let chunk = ChunkPayload {
+            map_id: [1; 32],
+            file_content_id: [2; 32],
+            chunk_index: 0,
+            chunk_bytes: vec![0x61; CHUNK_MAX_LEN as usize + 1],
+        };
+        assert!(matches!(chunk.encode(1, 0), Err(CodecError::BadLength(_))));
+        assert!(matches!(
+            chunk.encode_zstd(1, 0),
+            Err(CodecError::BadLength(_))
+        ));
+    }
+
+    #[test]
     fn end_and_error_frames_are_never_compressed() {
         // No encode_zstd exists for End/Error; even hand-built zstd headers
         // for those kinds are rejected by parse_frame.
@@ -1034,7 +1159,9 @@ mod zstd_tests {
 
     #[test]
     fn concatenated_zstd_frames_are_rejected() {
-        let p = obj(0x22, 50_000).encode_zstd(1, 0).unwrap();
+        let object = obj(0x22, 50_000);
+        let identity = object.encode(1, 0).unwrap();
+        let p = object.encode_zstd(1, 0).unwrap();
         let wire1 = &p[HEADER_LEN..];
         // Two independent zstd frames concatenated in one payload region.
         let mut doubled = Vec::new();
@@ -1044,10 +1171,10 @@ mod zstd_tests {
             KIND_OBJECT,
             FLAG_ZSTD,
             doubled.len() as u32,
-            50_000,
+            (identity.len() - HEADER_LEN) as u32,
             1,
             0,
-            sha256(&[&doubled]),
+            sha256(&[&identity[HEADER_LEN..]]),
         );
         out.extend_from_slice(&doubled);
         assert!(parse_frame(&out).is_err(), "two frames must not decode");
@@ -1055,7 +1182,9 @@ mod zstd_tests {
 
     #[test]
     fn trailing_bytes_after_frame_are_rejected() {
-        let p = obj(0x33, 50_000).encode_zstd(1, 0).unwrap();
+        let object = obj(0x33, 50_000);
+        let identity = object.encode(1, 0).unwrap();
+        let p = object.encode_zstd(1, 0).unwrap();
         let wire = &p[HEADER_LEN..];
         let mut padded = wire.to_vec();
         padded.push(0x00);
@@ -1063,10 +1192,10 @@ mod zstd_tests {
             KIND_OBJECT,
             FLAG_ZSTD,
             padded.len() as u32,
-            50_000,
+            (identity.len() - HEADER_LEN) as u32,
             1,
             0,
-            sha256(&[&padded]),
+            sha256(&[&identity[HEADER_LEN..]]),
         );
         out.extend_from_slice(&padded);
         assert!(parse_frame(&out).is_err(), "trailing byte must fail");
@@ -1074,9 +1203,12 @@ mod zstd_tests {
 
     #[test]
     fn wrong_raw_len_is_rejected_short_and_long() {
-        let p = obj(0x44, 50_000).encode_zstd(1, 0).unwrap();
+        let object = obj(0x44, 50_000);
+        let identity = object.encode(1, 0).unwrap();
+        let p = object.encode_zstd(1, 0).unwrap();
         let wire = &p[HEADER_LEN..];
-        for advertised in [10u32, 50_001] {
+        let raw = &identity[HEADER_LEN..];
+        for advertised in [raw.len() as u32 - 1, raw.len() as u32 + 1] {
             let mut out = header(
                 KIND_OBJECT,
                 FLAG_ZSTD,
@@ -1084,10 +1216,13 @@ mod zstd_tests {
                 advertised,
                 1,
                 0,
-                sha256(&[wire]),
+                sha256(&[raw]),
             );
             out.extend_from_slice(wire);
-            assert!(parse_frame(&out).is_err(), "raw_len={advertised} must fail");
+            assert!(
+                matches!(parse_frame(&out), Err(CodecError::BadLength(_))),
+                "raw_len={advertised} must fail"
+            );
         }
     }
 

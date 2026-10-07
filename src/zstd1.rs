@@ -28,11 +28,78 @@ pub fn compress(payload: &[u8], level: i32) -> CodecResult<Vec<u8>> {
 
 /// Maximum raw payload the spec 06 frame kinds allow: 1 MiB data + the
 /// frame's own structural fields (a full CHUNK frame carries the 1 MiB chunk
-/// plus map_id/file_content_id/chunk_index — 72 bytes — and a little slack
-/// for future header fields; spec 14). Any `raw_len` above this is rejected
+/// plus map_id/file_content_id/chunk_index/chunk_len — 76 bytes;
+/// spec 14). Any `raw_len` above this is rejected
 /// before allocation to prevent DoS from a forged header claiming a huge
 /// size.
-pub const MAX_RAW_PAYLOAD: usize = 1_048_576 + 256;
+pub const MAX_RAW_PAYLOAD: usize = 1_048_576 + 76;
+
+fn validate_frame_header(wire: &[u8], raw_len: usize) -> CodecResult<()> {
+    // Direct-output decoding can bypass libzstd's window setting.
+    let descriptor = *wire.get(4).ok_or(CodecError::Truncated("zstd header"))?;
+    if descriptor & 0x08 != 0 {
+        return Err(CodecError::BadConstant("zstd reserved header bit"));
+    }
+    let single_segment = descriptor & 0x20 != 0;
+    let mut offset = 5;
+    if !single_segment {
+        let window = *wire
+            .get(offset)
+            .ok_or(CodecError::Truncated("zstd window"))?;
+        offset += 1;
+        let base = 1u64 << (10 + (window >> 3));
+        let bytes = base + (base >> 3) * u64::from(window & 7);
+        if bytes > 1u64 << MAX_WINDOW_LOG {
+            return Err(CodecError::BadLength("zstd window exceeds 8MiB"));
+        }
+    }
+    let dictionary_len = match descriptor & 3 {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    let dictionary = wire
+        .get(offset..offset + dictionary_len)
+        .ok_or(CodecError::Truncated("zstd dictionary ID"))?;
+    if dictionary.iter().any(|byte| *byte != 0) {
+        return Err(CodecError::Unsupported("external zstd dictionary"));
+    }
+    offset += dictionary_len;
+    let content_size_len = match descriptor >> 6 {
+        0 => {
+            if single_segment {
+                1
+            } else {
+                0
+            }
+        }
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    if content_size_len != 0 {
+        let bytes = wire
+            .get(offset..offset + content_size_len)
+            .ok_or(CodecError::Truncated("zstd content size"))?;
+        let mut size = bytes
+            .iter()
+            .enumerate()
+            .fold(0u64, |size, (i, byte)| size | (u64::from(*byte) << (8 * i)));
+        if content_size_len == 2 {
+            size += 256;
+        }
+        if single_segment && size > 1u64 << MAX_WINDOW_LOG {
+            return Err(CodecError::BadLength("zstd window exceeds 8MiB"));
+        }
+        if size != raw_len as u64 {
+            return Err(CodecError::BadLength(
+                "zstd content size differs from raw_len",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Strict single-frame decompression (see module docs). `raw_len` is the
 /// header-advertised uncompressed length and bounds the output exactly.
@@ -53,16 +120,10 @@ pub fn decompress_strict(wire: &[u8], raw_len: usize) -> CodecResult<Vec<u8>> {
             "zstd payload is not one standard frame",
         ));
     }
+    validate_frame_header(wire, raw_len)?;
     let mut dctx = DCtx::create();
     dctx.set_parameter(DParameter::WindowLogMax(MAX_WINDOW_LOG))
         .map_err(|_| CodecError::Unsupported("zstd window larger than 8MiB"))?;
-
-    // Note on window enforcement: libzstd's single-pass shortcut (used when
-    // all input is available at once) decompresses directly into the caller's
-    // output buffer without allocating a separate window. The raw_len cap
-    // above therefore bounds the actual memory, making the WindowLogMax
-    // bypass harmless for this decode path. Frames that require a larger
-    // window will fail on the raw_len check before reaching libzstd.
 
     let mut out = vec![0u8; raw_len];
     let mut input = InBuffer::around(wire);
@@ -72,11 +133,15 @@ pub fn decompress_strict(wire: &[u8], raw_len: usize) -> CodecResult<Vec<u8>> {
     // exactly raw_len: an over-long stream fails instead of growing into a
     // loose allocation.
     loop {
+        let previous = (input.pos(), output.pos());
         let hint = dctx
             .decompress_stream(&mut output, &mut input)
             .map_err(|_| CodecError::DigestMismatch("zstd decompression failed"))?;
         if hint == 0 {
             break;
+        }
+        if previous == (input.pos(), output.pos()) {
+            return Err(CodecError::Truncated("zstd frame"));
         }
         if output.pos() == raw_len {
             // Decoder wants more output but the advertised raw_len is full.
@@ -127,6 +192,49 @@ mod tests {
     }
 
     #[test]
+    fn advertised_window_is_checked_even_for_a_one_byte_raw_block() {
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x68, 0x09, 0x00, 0x00, 0x42];
+        assert_eq!(decompress_strict(&frame, 1).unwrap(), vec![0x42]);
+        frame[5] = 0x69;
+        assert!(matches!(
+            decompress_strict(&frame, 1),
+            Err(CodecError::BadLength("zstd window exceeds 8MiB"))
+        ));
+    }
+
+    #[test]
+    fn dictionary_id_and_single_segment_content_size_are_checked() {
+        let dictionary = [0x28, 0xB5, 0x2F, 0xFD, 0x01, 0x00, 0x01, 0x09, 0, 0, 0x42];
+        assert!(matches!(
+            decompress_strict(&dictionary, 1),
+            Err(CodecError::Unsupported("external zstd dictionary"))
+        ));
+        let single = [0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x01, 0x09, 0, 0, 0x42];
+        assert_eq!(decompress_strict(&single, 1).unwrap(), vec![0x42]);
+        assert!(matches!(
+            decompress_strict(&single, 2),
+            Err(CodecError::BadLength(_))
+        ));
+    }
+
+    #[test]
+    fn every_truncated_prefix_returns_an_error() {
+        let payload = vec![0x73; 4096];
+        let wire = compress(&payload, 3).unwrap();
+        for end in 0..wire.len() {
+            assert!(
+                decompress_strict(&wire[..end], payload.len()).is_err(),
+                "prefix={end}"
+            );
+        }
+        let raw_block = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x09, 0, 0, 0x42];
+        assert!(matches!(
+            decompress_strict(&raw_block[..9], 1),
+            Err(CodecError::Truncated(_))
+        ));
+    }
+
+    #[test]
     fn rejects_short_and_overlong_output() {
         let payload = vec![3u8; 40_000];
         let wire = compress(&payload, 3).unwrap();
@@ -156,16 +264,16 @@ mod tests {
 
     #[test]
     fn full_mib_chunk_payload_fits_under_the_cap() {
-        // A full 1 MiB CHUNK frame's raw payload is the chunk plus its 72
-        // bytes of frame fields (map_id + file_content_id + chunk_index):
+        // A full 1 MiB CHUNK frame's raw payload is the chunk plus its 76
+        // bytes of frame fields (map_id + file_content_id + chunk_index + chunk_len):
         // the cap must accept it or every max-size chunk read over zstd
         // fails (regression for the 0.3.0 +64 estimate).
-        let payload_len = 1_048_576 + 72;
+        let payload_len = 1_048_576 + 76;
         let payload = vec![0xA5u8; payload_len];
         let wire = compress(&payload, 1).unwrap();
         assert_eq!(decompress_strict(&wire, payload_len).unwrap(), payload);
         // Just above the cap is still refused.
-        let mut over = vec![0xA5u8; MAX_RAW_PAYLOAD + 1];
+        let over = vec![0xA5u8; MAX_RAW_PAYLOAD + 1];
         assert!(decompress_strict(&compress(&over, 1).unwrap(), over.len()).is_err());
     }
 }
