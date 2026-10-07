@@ -7,6 +7,7 @@
 pub mod chunkmap;
 pub mod descriptor;
 pub mod metapage;
+pub mod namespace;
 pub mod treeframe;
 #[cfg(feature = "zstd")]
 pub mod zstd1;

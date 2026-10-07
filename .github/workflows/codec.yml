@@ -1,0 +1,44 @@
+name: Codec gates
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codec-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codec:
+    name: ${{ matrix.os }} / ${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        profile: [identity, zstd]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.profile }}
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Build, lint and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          codec_features=--no-default-features
+          if [ '${{ matrix.profile }}' = zstd ]; then
+            codec_features=--all-features
+          fi
+          cargo clippy --all-targets "$codec_features" --locked -- -D warnings
+          cargo build "$codec_features" --locked
+          cargo test "$codec_features" --locked

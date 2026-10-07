@@ -7,9 +7,9 @@
 //! `encode_zstd` on the three compressible payloads. END/ERROR are never
 //! compressed.
 
-use crate::{
-    read_u16, read_u32, read_u64, sha256, write_u16, write_u32, write_u64, CodecError, CodecResult,
-};
+use crate::{read_u16, read_u32, read_u64, sha256, CodecError, CodecResult};
+#[cfg(feature = "zstd")]
+use crate::{write_u16, write_u32, write_u64};
 
 pub const VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 64;
@@ -642,6 +642,7 @@ impl MetaPayload {
         frame_bytes_zstd(KIND_META, &payload, stream_id, sequence)
     }
 
+    #[cfg(feature = "zstd")]
     fn raw_payload(&self) -> CodecResult<Vec<u8>> {
         let mut payload = Vec::new();
         write_u16(&mut payload, self.pages.len() as u16);
@@ -695,6 +696,7 @@ impl ObjectPayload {
         frame_bytes_zstd(KIND_OBJECT, &payload, stream_id, sequence)
     }
 
+    #[cfg(feature = "zstd")]
     fn raw_payload(&self) -> CodecResult<Vec<u8>> {
         let mut payload = Vec::new();
         write_u16(&mut payload, self.objects.len() as u16);
@@ -738,6 +740,7 @@ impl ChunkPayload {
         frame_bytes_zstd(KIND_CHUNK, &payload, stream_id, sequence)
     }
 
+    #[cfg(feature = "zstd")]
     fn raw_payload(&self) -> Vec<u8> {
         let mut payload = Vec::with_capacity(76 + self.chunk_bytes.len());
         payload.extend_from_slice(&self.map_id);
